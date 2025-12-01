@@ -26,6 +26,7 @@ $$
 Given that the input spectrogram follows a linear frequency distribution (CQT), we can target specific harmonic distributions for permutation.
 
 We sample a random frequency $f\in F$. Knowing that the frequency's harmonics appear in $2f, 3f, ..., hf$ frequencies, we define that set of frequencies as:
+
 $$
    s_f = [x_f, x_{2f}, ... , x_{hf}] 
 $$
@@ -57,5 +58,3 @@ A common problem for AMT models is the lack of training examples for extreme cas
 $$
     X_{noise} \sim \mathcal{N}_{f, t}
 $$
-
-We can compute the general weight of each frequcny bin $f\in F$ as follows:
