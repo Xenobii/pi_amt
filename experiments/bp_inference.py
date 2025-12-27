@@ -19,6 +19,8 @@ from models.basic_pitch.basic_pitch_torch.constants import (
     FFT_HOP
 )
 
+from experiments.permutations import CQTRandPerm
+
 
 def custom_inference(
         audio_path: Union[pathlib.Path, str],
@@ -34,7 +36,18 @@ def custom_inference(
     if torch.cuda.is_available():
         audio_windowed = audio_windowed.cuda()
 
-    # Add hook here
+    # Hook permutations
+    permuter = CQTRandPerm(seed=0)
+    def bp_pre_hook(
+            module: nn.Module,
+            inputs: Tuple[torch.Tensor, ...],
+    ) -> Tuple[torch.Tensor, ...]:
+        (x,) = inputs
+        x_perm = permuter(x)
+        return (x_perm,)
+    handle = model.hs.register_forward_pre_hook(bp_pre_hook)
+    
+    # Run inference
     output = model(audio_windowed)
 
     """ 
@@ -47,7 +60,6 @@ def custom_inference(
     unwrapped_output = {k: unwrap_output(output[k], audio_original_length, n_overlapping_frames) for k in output}
 
     return unwrapped_output
-
 
 
 def custom_predict(
@@ -87,6 +99,7 @@ def custom_predict(
     )
 
     return model_output, midi_data, note_events
+
 
 
 
