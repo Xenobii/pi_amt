@@ -82,7 +82,7 @@ def custom_predict(
     if torch.cuda.is_available():
         model.cuda()
 
-    print(f"Predicting MIDI fo {audio_path}...")
+    print(f"Predicting MIDI for {audio_path}...")
 
     model_output = custom_inference(audio_path, model)
     min_note_len = int(np.round(minimum_note_length / 1000 * (AUDIO_SAMPLE_RATE / FFT_HOP)))

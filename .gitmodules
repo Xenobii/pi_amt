@@ -1,3 +1,6 @@
 [submodule "models/basic_pitch"]
 	path = models/basic_pitch
 	url = https://github.com/gudgud96/basic-pitch-torch.git
+[submodule "models/of_alt"]
+	path = models/of_alt
+	url = https://github.com/w4k2/automatic_music_transcription.git
