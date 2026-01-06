@@ -1,59 +1,155 @@
-from typing import Tuple, Optional
+from typing import Optional, Tuple
 import numpy as np
+import matplotlib.pyplot as plt
 import pretty_midi
 
 import torch
 import torch.nn as nn
-import matplotlib.pyplot as plt
 
 
-# Constants from basic_pitch (duplicated to avoid circular imports)
-AUDIO_SAMPLE_RATE = 22050
-FFT_HOP = 256
-AUDIO_WINDOW_LENGTH = 2  # seconds
-ANNOTATIONS_FPS = AUDIO_SAMPLE_RATE // FFT_HOP
-AUDIO_N_SAMPLES = AUDIO_SAMPLE_RATE * AUDIO_WINDOW_LENGTH - FFT_HOP
-N_OVERLAPPING_FRAMES = 30
+
+"""Permutations"""
+
+class Permutation(nn.Module):
+    def __init__(self, name, seed: int = 0):
+        """
+        Base class for CQT frequency-axis permutations.
+        """
+        super().__init__()
+        self.name = name
+        self.gen = torch.Generator()
+        self.gen.manual_seed(seed)
+    
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x: [B, T, F]
+        """
+        return NotImplementedError
 
 
-def midi_to_hz(midi: torch.Tensor) -> torch.Tensor:
-    return 440.0 * (2.0 ** ((midi - 69) / 12))
+class RandomPermutation(Permutation):
+    def __init__(self, name: str, p: float=0.1, seed: int=0, **kwargs):
+        """
+        Random per-frame bin swapping.
 
+        p: probability of swapping a given bin with another bin
+        """
+        super().__init__(name, seed)
+        self.p = p
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        B, T, F = x.shape
+        device = x.device
+
+        base = torch.arange(F, device=device)
+        noise = torch.rand(B, T, F, generator=self.gen, device=device)
+
+        # Noisy identity permutation
+        scores = base + (noise < self.p) * torch.rand_like(noise)
+        perm_idx = torch.argsort(scores, dim=-1)
+
+        return torch.gather(x, dim=-1, index=perm_idx)
+
+
+class HighFreqPermutation(Permutation):
+    def __init__(self, name: str, start_bin: int, seed: int = 0):
+        """
+        Permutes only high-frequency bins (>= start_bin),
+        independently per frame.
+        """
+        super().__init__(name, seed)
+        self.start_bin = start_bin
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        B, T, F = x.shape
+        device = x.device
+        assert 0 <= self.start_bin < F
+
+        # Identity permutation
+        perm_idx = torch.arange(F, device=device).expand(B, T, F).clone()
+
+        hf_len = F - self.start_bin
+        hf_perm = torch.argsort(
+            torch.rand(B, T, hf_len, generator=self.gen, device=device),
+            dim=-1
+        ) + self.start_bin
+
+        perm_idx[..., self.start_bin:] = hf_perm
+
+        return torch.gather(x, dim=-1, index=perm_idx)
+
+
+class MicrotonalPermutation(Permutation):
+    def __init__(self, name: str, bins_per_semitone: int, seed: int = 0):
+        """
+        Permutes bins within each semitone group.
+
+        bins_per_semitone: number of CQT bins per semitone
+        """
+        super().__init__(name, seed)
+        self.bins_per_semitone = bins_per_semitone
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        B, T, F = x.shape
+        device = x.device
+
+        bps = self.bins_per_semitone
+        n_semitones = F // bps
+        assert n_semitones * bps == F, "F must be divisible by bins_per_semitone"
+
+        # Generate one permutation per semitone
+        perm = torch.argsort(
+            torch.rand(n_semitones, bps, generator=self.gen, device=device),
+            dim=-1
+        )
+
+        # Convert to absolute frequency indices
+        perm_idx = (
+            perm
+            + torch.arange(n_semitones, device=device)[:, None] * bps
+        ).reshape(-1)
+
+        return x[..., perm_idx]
+
+
+
+"""Maskings"""
 
 class FeatureMasker(nn.Module):
     def __init__(
-        self,
-        spec_type: str = "cqt",
-        bins_per_octave: int = 3 * 12,
-        f_min: float = 27.7,
-        f_max: Optional[float] = None,
+            self,
+            name: str,
+            sr: int = 22050,
+            n_overlapping_frames: int = 30,
+            fft_hop: int = 256,
+            audio_window_length: int = 2
     ):
         """
         Base class for spectrogram feature masking
         """
         super().__init__()
-        self.spec_type = spec_type
-        self.bins_per_octave = bins_per_octave
-        self.f_min = f_min
-        self.f_max = f_max
+        self.name = name
+        self.fft_hop = fft_hop
+        self.fps = sr // fft_hop
+        self.audio_n_samples = sr * audio_window_length - fft_hop
+        self.n_overlapping_frames = n_overlapping_frames
+        self.bins_per_octave = 3 * 12
+        self.f_min = 27.7
 
-    def load_label(self, midi_path: str, audio_length_samples: Optional[int] = None):
+    def load_label(self, midi_path: str):
         """
         Loads the MIDI as a binary piano roll and registers it as a buffer.
         Windowing is deferred to _align_label_to_input() where actual input dimensions are known.
         """
         midi_data = pretty_midi.PrettyMIDI(midi_path)
 
-        if audio_length_samples is not None:
-            duration = audio_length_samples / AUDIO_SAMPLE_RATE
-        else:
-            duration = midi_data.get_end_time()
+        duration = midi_data.get_end_time()
 
-        piano_roll = midi_data.get_piano_roll(fs=ANNOTATIONS_FPS)
+        piano_roll = midi_data.get_piano_roll(fs=self.fps)
         piano_roll = (piano_roll > 0).astype(np.float32)
 
         # make piano_roll match the audio duration in annotation frames
-        n_frames_expected = int(np.ceil(duration * ANNOTATIONS_FPS))
+        n_frames_expected = int(np.ceil(duration * self.fps))
         if piano_roll.shape[1] < n_frames_expected:
             piano_roll = np.pad(piano_roll, ((0, 0), (0, n_frames_expected - piano_roll.shape[1])), mode="constant")
         elif piano_roll.shape[1] > n_frames_expected:
@@ -80,12 +176,12 @@ class FeatureMasker(nn.Module):
         N, T_total = self.label_raw.shape
         
         # Calculate windowing parameters (same as basic_pitch inference)
-        overlap_len_samples = N_OVERLAPPING_FRAMES * FFT_HOP
-        hop_size_samples = AUDIO_N_SAMPLES - overlap_len_samples
+        overlap_len_samples = self.n_overlapping_frames * self.fft_hop
+        hop_size_samples = self.audio_n_samples - overlap_len_samples
         
         # Convert to annotation frames
-        hop_size_frames = hop_size_samples // FFT_HOP
-        overlap_frames = overlap_len_samples // FFT_HOP
+        hop_size_frames = hop_size_samples // self.fft_hop
+        overlap_frames = overlap_len_samples // self.fft_hop
         
         # Pad start to match basic_pitch's padding
         pad_start_frames = overlap_frames // 2
@@ -106,7 +202,7 @@ class FeatureMasker(nn.Module):
         
         return torch.stack(windows, dim=0)  # [B, N, T]
 
-    def note_to_cqt_bin(
+    def note_to_bin(
         self,
         midi_notes: torch.Tensor,  # [N]
         F: int
@@ -119,39 +215,6 @@ class FeatureMasker(nn.Module):
         bins = bins.round().long()
 
         return bins.clamp(min=0, max=F - 1)
-
-    def note_to_mel_bin(
-        self,
-        midi_notes: torch.Tensor,  # [N]
-        F: int
-    ) -> torch.Tensor:
-        """
-        Approximate MIDI → mel-bin mapping
-        """
-        freqs = 440.0 * (2.0 ** ((midi_notes - 69) / 12))
-
-        mel = 2595.0 * torch.log10(1.0 + freqs / 700.0)
-        mel_min = 2595.0 * torch.log10(1.0 + self.f_min / 700.0)
-
-        if self.f_max is None:
-            raise ValueError("f_max must be set for mel masking")
-
-        mel_max = 2595.0 * torch.log10(1.0 + self.f_max / 700.0)
-
-        bins = (mel - mel_min) / (mel_max - mel_min) * (F - 1)
-        return bins.round().long().clamp(0, F - 1)
-
-    def note_to_bin(
-        self,
-        midi_notes: torch.Tensor,
-        F: int
-    ) -> torch.Tensor:
-        if self.spec_type == "cqt":
-            return self.note_to_cqt_bin(midi_notes, F)
-        elif self.spec_type == "log-mel":
-            return self.note_to_mel_bin(midi_notes, F)
-        else:
-            raise ValueError(f"Unknown spec_type: {self.spec_type}")
 
     @staticmethod
     def build_fundamental_mask(
@@ -253,7 +316,7 @@ class FundamentalMasking(FeatureMasker):
         x_out = x.clone()
         x_out[fund_mask] = 0.0
 
-        self.plot(x_out, 1)
+        self.plot(x_out, 0)
 
         return x_out
 

@@ -1,0 +1,24 @@
+name: pi_mir
+
+channels:
+  - defaults
+  - conda-forge
+  - pytorch
+
+dependencies:
+  - python=3.9
+  - pytorch
+  - torchaudio
+  - cudatoolkit=11.9
+  - pip
+
+  - pip:
+    - scipy==1.12
+    - pretty_midi
+    - mir_eval
+    - librosa
+    - resampy
+    - nnaudio
+    - hydra-core
+    - pandas
+    - omegaconf

@@ -1,0 +1,34 @@
+# Models
+models:
+  - name: basic_pitch
+    _target_: pipeline.models.BasicPitchAdapter
+    weight_path: models/basic_pitch/assets/basic_pitch_pytorch_icassp_2022.pth
+    inference_settings:
+      onset_thresh: 0.5
+      frame_thresh: 0.3
+      min_note_len: 11
+      min_freq: null
+      max_freq: null
+      multiple_pitch_bends: false
+      melodia_trick: true
+      midi_tempo: 120
+
+# Permutations
+permutations:
+  - name: rand_permute
+    _target_: pipeline.permutations.RandomPermutation
+
+  - name: hf_permute
+    _target_: pipeline.permutations.HighFreqPermutation
+
+  - name: micro_permute
+    _target_: pipeline.permutations.MicrotonalPermutation
+
+  - name: fundamental_mask
+    _target_: pipeline.permutations.FundamentalMasking
+
+  - name: harmonic_mask
+    _target_: pipeline.permutations.HarmonicMasking
+
+  - name: soft_harmonic_mask
+    _target_: pipeline.permutations.SoftFundamentalMasking
