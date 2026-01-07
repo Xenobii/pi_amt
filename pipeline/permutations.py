@@ -18,7 +18,7 @@ class Permutation(nn.Module):
         super().__init__()
         self.name = name
         self.gen = torch.Generator()
-        self.gen.manual_seed(seed)
+        self.gen.manual_seed(int(seed))
     
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -52,29 +52,32 @@ class RandomPermutation(Permutation):
 
 
 class HighFreqPermutation(Permutation):
-    def __init__(self, name: str, start_bin: int, seed: int = 0):
+    def __init__(self, name: str, start: int, seed: int = 0):
         """
-        Permutes only high-frequency bins (>= start_bin),
+        Permutes only high-frequency bins (>= start percentage),
         independently per frame.
         """
         super().__init__(name, seed)
-        self.start_bin = start_bin
+        assert 0.0 < start < 1.0
+        self.start = start
 
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         B, T, F = x.shape
         device = x.device
-        assert 0 <= self.start_bin < F
+
+        start_bin = int(self.start * F)
+        start_bin = min(max(start_bin, 0), F - 1)
 
         # Identity permutation
         perm_idx = torch.arange(F, device=device).expand(B, T, F).clone()
 
-        hf_len = F - self.start_bin
+        hf_len = F - start_bin
         hf_perm = torch.argsort(
             torch.rand(B, T, hf_len, generator=self.gen, device=device),
             dim=-1
-        ) + self.start_bin
+        ) + start_bin
 
-        perm_idx[..., self.start_bin:] = hf_perm
+        perm_idx[..., start_bin:] = hf_perm
 
         return torch.gather(x, dim=-1, index=perm_idx)
 

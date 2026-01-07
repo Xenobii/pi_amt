@@ -67,7 +67,7 @@ class BasicPitch(BaseModel):
 
         # Window audio
         audio_windowed, _, audio_original_length = get_audio_input(wav_path, overlap_len, hop_size)
-        audio_windowed = torch.from_numpy(audio_windowed).T
+        audio_windowed = torch.from_numpy(audio_windowed.copy()).T
         if torch.cuda.is_available():
             audio_windowed = audio_windowed.cuda()
 
