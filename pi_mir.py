@@ -2,64 +2,71 @@
 # Alvanos Stelios
 # steliosalvanos@gmail.com
 
-import hydra
-from hydra.utils import instantiate
 import pandas as pd
+import json
+import hydra
+from pathlib import Path
+from tqdm import tqdm
+from hydra.utils import instantiate
+from omegaconf import DictConfig
+from collections import defaultdict
 
 from evaluation import eval_model
 
-"""
-Pipeline:
 
-for model in models
-    for dataset in datasets
-        evaluate model
-        for permutation in permutations
-            evaluate model with permuted data
-            end for
-        end for
-    end for
-end for            
-"""
+def save_metrics(scores: dict):
+    run_dir = Path(hydra.core.hydra_config.HydraConfig.get().runtime.output_dir)
+    out_file = run_dir / "metrics.json"
+
+    with open(out_file, "w") as f:
+        json.dump(scores, f, indent=2)
+
+
 
 @hydra.main(version_base="1.3", config_path="config", config_name="config")
-def main(cfg):
-    print("-- Permutation Importance in Automatic Music Transcription --")
+def evaluate_all(cfg: DictConfig):
     
-    models       = [instantiate(m) for m in cfg.models]
-    datasets     = [instantiate(d) for d in cfg.datasets]
-    permutations = [instantiate(p) for p in cfg.permutations]
+    # Load modules
+    model       = instantiate(cfg.model)
+    dataset     = instantiate(cfg.dataset)
+    permutation = instantiate(cfg.permutation)
+
+    print(f"Model    : {model.name}")
+    print(f"Dataset  : {dataset.name}")
+    print(f"Permuter : {permutation.name}")
+
+    metrics = defaultdict(list)
     
-    rows = []
+    # Evalutation pipeline
+    for item in tqdm(dataset, desc=f"Evalutating for {model.name}, {dataset.name}, {permutation.name}"):
+        model.load()
+        model.load_hook(permutation)
+        model.clear_hooks()
+        output = model.predict(item["wav_file"])
 
-    for model in models:
-        for dataset in datasets:
-            
-            metrics = eval_model(model, dataset)
-            
-            rows.append({
-                "model": model.name,
-                "dataset": dataset.name,
-                "permutation": None,
-                **metrics,
-            })
+        # Evaluate
+        ref_intervals, ref_pitches = dataset.create_eval_data(item["mid_file"])
+        est_intervals, est_pitches = model.prepare_for_eval(output)
 
-            for permutation in permutations:
-                metrics = eval_model(model, dataset, permutation)
+        scores = eval_model(
+            ref_intervals, ref_pitches,
+            est_intervals, est_pitches
+        )
 
-                rows.append({
-                    "model": model.name,
-                    "dataset": dataset.name,
-                    "permutation": permutation.name,
-                    **metrics,
-                })
-        
-    df = pd.DataFrame(rows)
-    df.to_parquet("evaluation.parquet")
+        for k, v in scores.items():
+            metrics[k].append(v)
 
-    print(df.head())
+    avg_scores = {k: sum(vs)/len(vs) for k, vs in metrics.items()}
+
+    print("\nEvaluation results:")
+    for k, v in avg_scores.items():
+        print(f"    {k}: {round(v, 4)}")
+
+    save_metrics(avg_scores)
 
 
 
 if __name__=="__main__":
-    main()
+    print("\n-- Permutation Importance in Multi-Pitch Estimation --\n")
+    evaluate_all()
+    print("\n-- Evaluation Successful! --\n")

@@ -4,7 +4,6 @@ import numpy as np
 from pathlib import Path
 from typing import Tuple
 from abc import abstractmethod
-from datetime import datetime
 
 import torch
 from torch import nn
@@ -15,6 +14,8 @@ from models.basic_pitch.basic_pitch_torch.model import BasicPitchTorch
 from models.basic_pitch.basic_pitch_torch import note_creation as infer
 from models.basic_pitch.basic_pitch_torch.inference import unwrap_output, get_audio_input, predict
 from models.basic_pitch.basic_pitch_torch.constants import AUDIO_N_SAMPLES, FFT_HOP
+
+pretty_midi.pretty_midi.MAX_TICK = 1e10
 
 # Onsets and Frames
 # from models.of_alt.model.model import UnetTranscriptionModel
@@ -141,15 +142,14 @@ class BasicPitch(BaseModel):
     def write_midi(self, midi_data: pretty_midi.PrettyMIDI, file_path: str):
         midi_data.write(file_path)
 
-    
 
 class OnsetsAndFrames(BaseModel):
     def __init__(self, name, weight_path, **kwargs):
         super().__init__()
 
-    def load(self):
-        self.model = UnetTranscriptionModel(
-            ds_ksize=(2, 2),
-            ds_stride=(2, 2),
-            mode='imagewise',
-        )
+    # def load(self):
+        # self.model = UnetTranscriptionModel(
+        #     ds_ksize=(2, 2),
+        #     ds_stride=(2, 2),
+        #     mode='imagewise',
+        # )

@@ -1,43 +1,10 @@
-# Models
-models:
-  - name: Basic Pitch
-    _target_: pipeline.models.BasicPitch
-    weight_path: models/basic_pitch/assets/basic_pitch_pytorch_icassp_2022.pth
-    inference_settings:
-      onset_thresh: 0.5
-      frame_thresh: 0.3
-      min_note_len: 11
-      min_freq: null
-      max_freq: null
-      multiple_pitch_bends: false
-      melodia_trick: true
-      midi_tempo: 120
+defaults:
+  - model: basic_pitch
+  - dataset: maps
+  - permutation: random
+  - _self_
 
-# Datasets
-datasets:
-  - name: MAPS
-    _target_: pipeline.datasets.MAPS
-    data_folder: datasets/maps
-
-# Permutations
-permutations:
-  - name: Random Permutation
-    _target_: pipeline.permutations.RandomPermutation
-    p: 0.1
-
-  - name: High Frequency Permutation
-    _target_: pipeline.permutations.HighFreqPermutation
-    start: 0.85
-
-  - name: Microtonal Permutation
-    _target_: pipeline.permutations.MicrotonalPermutation
-    bins_per_semitone: 3
-
-  # - name: Fundamental Masking
-  #   _target_: pipeline.permutations.FundamentalMasking
-
-  # - name: Harmonic Masking
-  #   _target_: pipeline.permutations.HarmonicMasking
-
-  # - name: Soft Harmonic Masking
-  #   _target_: pipeline.permutations.SoftFundamentalMasking
+# hydra:
+#   sweeper:
+#     params:
+#       permutation: glob(*)

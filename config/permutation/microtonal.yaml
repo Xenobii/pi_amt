@@ -1,0 +1,3 @@
+name: Microtonal Permutation
+_target_: pipeline.permutations.MicrotonalPermutation
+bins_per_semitone: 3

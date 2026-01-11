@@ -1,0 +1,3 @@
+name: High Frequency Permutation
+_target_: pipeline.permutations.HighFreqPermutation
+start: 0.85

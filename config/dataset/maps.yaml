@@ -1,0 +1,3 @@
+name: MAPS
+_target_: pipeline.datasets.MAPS
+data_folder: datasets/maps
