@@ -1,7 +1,10 @@
 import sys
+import pretty_midi
+import numpy as np
 from pathlib import Path
 from typing import Tuple
-from abc import ABC, abstractmethod
+from abc import abstractmethod
+from datetime import datetime
 
 import torch
 from torch import nn
@@ -30,12 +33,32 @@ class BaseModel():
     def load_hook(self, hook):
         return NotImplementedError
 
-    @abstractmethod
     def clear_hooks(self):
+        if not hasattr(self, "model") or self.model is None:
+            print("Hook clearing failed, model has not been loaded yet")
+            return
+        for m in self.model.modules():
+            for attr in ("_forward_pre_hooks", "_forward_hooks", "_backward_hooks",
+                         "_forward_post_hooks", "_backward_pre_hooks"):
+                if hasattr(m, attr):
+                    try:
+                        getattr(m, attr).clear()
+                    except Exception:
+                        try: 
+                            setattr(m, attr, {})
+                        except Exception:
+                            pass
+    
+    @abstractmethod
+    def predict(self, wav_path: str):
         return NotImplementedError
     
     @abstractmethod
-    def predict(self, wav_path):
+    def prepare_for_eval(self, model_output):
+        return NotImplementedError
+    
+    @abstractmethod
+    def write_midi(self, model_output):
         return NotImplementedError
 
 
@@ -93,12 +116,32 @@ class BasicPitch(BaseModel):
         model_output = self.inference(wav_path)
 
         # Convert to midi
-        midi_data, note_events = infer.model_output_to_notes(
+        midi_data, _ = infer.model_output_to_notes(
             model_output,
             **self.inference_settings
         )
-        return model_output, midi_data, note_events
+        return midi_data
+    
+    def prepare_for_eval(self, midi_data: pretty_midi.PrettyMIDI) -> Tuple[np.array, np.array]:
+        """
+        Returns the intervals and pitches used for mir_eval transcription
+        """
+        intervals = []
+        pitches = []
 
+        for i in midi_data.instruments:
+            if i.is_drum:
+                continue
+            for note in i.notes:
+                intervals.append([note.start, note.end])
+                pitches.append(note.pitch)
+        
+        return np.array(intervals), np.array(pitches)
+    
+    def write_midi(self, midi_data: pretty_midi.PrettyMIDI, file_path: str):
+        midi_data.write(file_path)
+
+    
 
 class OnsetsAndFrames(BaseModel):
     def __init__(self, name, weight_path, **kwargs):
