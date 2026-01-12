@@ -1,7 +1,7 @@
 defaults:
   - model: basic_pitch
   - dataset: maps
-  - permutation: random
+  - permutation: no_permutation
   - _self_
 
 # hydra:

@@ -27,6 +27,18 @@ class Permutation(nn.Module):
         return NotImplementedError
 
 
+class NoPermutation(Permutation):
+    def __init__(self, name: str, **kwargs):
+        """
+        Identity permutation
+        """
+        super().__init__(name)
+    
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        return x
+
+
+
 class RandomPermutation(Permutation):
     def __init__(self, name: str, p: float=0.1, seed: int=0, **kwargs):
         """
@@ -42,7 +54,7 @@ class RandomPermutation(Permutation):
         device = x.device
 
         base = torch.arange(F, device=device)
-        noise = torch.rand(B, T, F, generator=self.gen, device=device)
+        noise = torch.rand(B, T, F, generator=self.gen).to(device)
 
         # Noisy identity permutation
         scores = base + (noise < self.p) * torch.rand_like(noise)
@@ -72,8 +84,9 @@ class HighFreqPermutation(Permutation):
         perm_idx = torch.arange(F, device=device).expand(B, T, F).clone()
 
         hf_len = F - start_bin
+        # Generate on CPU with generator, then move to device
         hf_perm = torch.argsort(
-            torch.rand(B, T, hf_len, generator=self.gen, device=device),
+            torch.rand(B, T, hf_len, generator=self.gen).to(device),
             dim=-1
         ) + start_bin
 
@@ -100,11 +113,11 @@ class MicrotonalPermutation(Permutation):
         n_semitones = F // bps
         assert n_semitones * bps == F, "F must be divisible by bins_per_semitone"
 
-        # Generate one permutation per semitone
+        # Generate one permutation per semitone on CPU, then move to device
         perm = torch.argsort(
-            torch.rand(n_semitones, bps, generator=self.gen, device=device),
+            torch.rand(n_semitones, bps, generator=self.gen),
             dim=-1
-        )
+        ).to(device)
 
         # Convert to absolute frequency indices
         perm_idx = (

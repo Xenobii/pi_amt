@@ -2,6 +2,7 @@
 # Alvanos Stelios
 # steliosalvanos@gmail.com
 
+import numpy as np
 import pandas as pd
 import json
 import hydra
@@ -35,13 +36,14 @@ def evaluate_all(cfg: DictConfig):
     print(f"Dataset  : {dataset.name}")
     print(f"Permuter : {permutation.name}")
 
+    # Load model
+    model.load()
+    model.load_hook(permutation)
+
     metrics = defaultdict(list)
     
     # Evalutation pipeline
     for item in tqdm(dataset, desc=f"Evalutating for {model.name}, {dataset.name}, {permutation.name}"):
-        model.load()
-        model.load_hook(permutation)
-        model.clear_hooks()
         output = model.predict(item["wav_file"])
 
         # Evaluate
@@ -56,7 +58,10 @@ def evaluate_all(cfg: DictConfig):
         for k, v in scores.items():
             metrics[k].append(v)
 
-    avg_scores = {k: sum(vs)/len(vs) for k, vs in metrics.items()}
+    # Clear hooks
+    model.clear_hooks()
+
+    avg_scores = {k: np.mean(vs) for k, vs in metrics.items()}
 
     print("\nEvaluation results:")
     for k, v in avg_scores.items():

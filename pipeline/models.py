@@ -70,9 +70,8 @@ class BasicPitch(BaseModel):
         self.inference_settings = kwargs.get("inference_settings")
 
     def load(self):
-
         self.model = BasicPitchTorch()
-        self.model.load_state_dict(torch.load(str(self.weight_path)))
+        self.model.load_state_dict(torch.load(str(self.weight_path), weights_only=True))
         self.model.eval()
         if torch.cuda.is_available():
             self.model.cuda()

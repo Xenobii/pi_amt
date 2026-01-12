@@ -1,24 +1,26 @@
 name: pi_mir
 
 channels:
-  - defaults
-  - conda-forge
   - pytorch
+  - nvidia
+  - conda-forge
 
 dependencies:
   - python=3.9
   - pytorch
   - torchaudio
-  - cudatoolkit=11.9
+  - pytorch-cuda=11.8
+  - scipy=1.12
   - pip
 
   - pip:
-    - scipy==1.12
-    - pretty_midi
-    - mir_eval
-    - librosa
-    - resampy
-    - nnaudio
-    - hydra-core
-    - pandas
-    - omegaconf
+      - pretty_midi
+      - mir_eval
+      - librosa
+      - resampy
+      - nnaudio
+      - hydra-core
+      - pandas
+      - omegaconf
+      - tqdm
+      - matplotlib
