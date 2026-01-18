@@ -36,8 +36,7 @@ class BaseModel():
 
     def clear_hooks(self):
         if not hasattr(self, "model") or self.model is None:
-            print("Hook clearing failed, model has not been loaded yet")
-            return
+            raise Exception("Hook clearing failed, model has not been loaded yet")
         for m in self.model.modules():
             for attr in ("_forward_pre_hooks", "_forward_hooks", "_backward_hooks",
                          "_forward_post_hooks", "_backward_pre_hooks"):

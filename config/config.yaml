@@ -4,7 +4,13 @@ defaults:
   - permutation: no_permutation
   - _self_
 
-# hydra:
-#   sweeper:
-#     params:
-#       permutation: glob(*)
+  - override hydra/job_logging: custom
+
+evalutation:
+  subsample_every: 100
+
+hydra:
+  sweeper:
+    params:
+      permutation: high_freq, random, no_permutation, microtonal
+      dataset: maps, maestro

@@ -1,0 +1,3 @@
+name: MAESTRO 
+_target_: pipeline.datasets.MAESTRO
+data_folder: datasets/maestro

@@ -3,7 +3,6 @@
 # steliosalvanos@gmail.com
 
 import numpy as np
-import pandas as pd
 import json
 import hydra
 from pathlib import Path
@@ -11,39 +10,58 @@ from tqdm import tqdm
 from hydra.utils import instantiate
 from omegaconf import DictConfig
 from collections import defaultdict
+import logging
 
 from evaluation import eval_model
 
 
-def save_metrics(scores: dict):
+log = logging.getLogger(__name__)
+
+
+def save_metrics(scores: dict, model_name: str, permutation_name: str, dataset_name: str):
     run_dir = Path(hydra.core.hydra_config.HydraConfig.get().runtime.output_dir)
     out_file = run_dir / "metrics.json"
 
+    out_data = {
+        "model": model_name,
+        "dataset": dataset_name,
+        "permutation": permutation_name,
+        "scores": scores
+    }
+
     with open(out_file, "w") as f:
-        json.dump(scores, f, indent=2)
+        json.dump(out_data, f, indent=2)
 
 
 
 @hydra.main(version_base="1.3", config_path="config", config_name="config")
 def evaluate_all(cfg: DictConfig):
+    log.info("-- Permutation Importance in Multi-Pitch Estimation --")
     
     # Load modules
     model       = instantiate(cfg.model)
     dataset     = instantiate(cfg.dataset)
     permutation = instantiate(cfg.permutation)
 
-    print(f"Model    : {model.name}")
-    print(f"Dataset  : {dataset.name}")
-    print(f"Permuter : {permutation.name}")
+    log.info(f"Model    : {model.name}")
+    log.info(f"Dataset  : {dataset.name}")
+    log.info(f"Permuter : {permutation.name}")
 
     # Load model
     model.load()
     model.load_hook(permutation)
-
     metrics = defaultdict(list)
     
     # Evalutation pipeline
-    for item in tqdm(dataset, desc=f"Evalutating for {model.name}, {dataset.name}, {permutation.name}"):
+    subsample_every = cfg.evalutation.subsample_every
+    for idx, item in enumerate(tqdm(
+        dataset,
+        desc=f"Evalutating for {model.name}, {dataset.name}, {permutation.name}"
+    )):
+        # Sample one in 4 (validation size = 25%)
+        if idx % subsample_every != 0:
+            continue
+
         output = model.predict(item["wav_file"])
 
         # Evaluate
@@ -63,15 +81,14 @@ def evaluate_all(cfg: DictConfig):
 
     avg_scores = {k: np.mean(vs) for k, vs in metrics.items()}
 
-    print("\nEvaluation results:")
+    log.info("\nEvaluation results:")
     for k, v in avg_scores.items():
-        print(f"    {k}: {round(v, 4)}")
+        log.info(f"    {k}: {round(v, 4)}")
 
-    save_metrics(avg_scores)
+    save_metrics(avg_scores, model.name, permutation.name, dataset.name)
 
+    log.info("-- Evaluation Successful! --\n")
 
 
 if __name__=="__main__":
-    print("\n-- Permutation Importance in Multi-Pitch Estimation --\n")
     evaluate_all()
-    print("\n-- Evaluation Successful! --\n")
