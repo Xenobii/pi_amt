@@ -17,8 +17,15 @@ class Permutation(nn.Module):
         """
         super().__init__()
         self.name = name
-        self.gen = torch.Generator()
-        self.gen.manual_seed(int(seed))
+        self.seed = int(seed)
+        self._gens = {}
+
+    def _get_generator(self, device: torch.device) -> torch.Tensor:
+        if device not in self._gens:
+            gen = torch.Generator(device=device)
+            gen.manual_seed(self.seed)
+            self._gens[device] = gen
+        return self._gens[device]
     
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -34,6 +41,7 @@ class NoPermutation(Permutation):
         """
         super().__init__(name)
     
+    @torch.no_grad()
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         return x
 
@@ -49,16 +57,25 @@ class RandomPermutation(Permutation):
         super().__init__(name, seed)
         self.p = p
 
+    @torch.no_grad()
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         B, T, F = x.shape
         device = x.device
+        gen = self._get_generator(device)
 
         base = torch.arange(F, device=device)
-        noise = torch.rand(B, T, F, generator=self.gen).to(device)
 
-        # Noisy identity permutation
-        scores = base + (noise < self.p) * torch.rand_like(noise)
-        perm_idx = torch.argsort(scores, dim=-1)
+        swap_mask = torch.rand(B, T, F, device=device, generator=gen) < self.p
+
+        random_keys = torch.rand(B, T, F, device=device, generator=gen)
+
+        scores = torch.where(
+            swap_mask,
+            random_keys,
+            base.view(1, 1, F).expand(B, T, F).float()
+        )
+
+        perm_idx = scores.argsort(dim=-1)
 
         return torch.gather(x, dim=-1, index=perm_idx)
 
@@ -73,20 +90,20 @@ class HighFreqPermutation(Permutation):
         assert 0.0 < start < 1.0
         self.start = start
 
+    @torch.no_grad()
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         B, T, F = x.shape
         device = x.device
+        gen = self._get_generator(device)
 
         start_bin = int(self.start * F)
         start_bin = min(max(start_bin, 0), F - 1)
 
-        # Identity permutation
         perm_idx = torch.arange(F, device=device).expand(B, T, F).clone()
 
         hf_len = F - start_bin
-        # Generate on CPU with generator, then move to device
         hf_perm = torch.argsort(
-            torch.rand(B, T, hf_len, generator=self.gen).to(device),
+            torch.rand(B, T, hf_len, device=device, generator=gen),
             dim=-1
         ) + start_bin
 
@@ -105,21 +122,21 @@ class MicrotonalPermutation(Permutation):
         super().__init__(name, seed)
         self.bins_per_semitone = bins_per_semitone
 
+    @torch.no_grad()
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         B, T, F = x.shape
         device = x.device
+        gen = self._get_generator(device)
 
         bps = self.bins_per_semitone
         n_semitones = F // bps
         assert n_semitones * bps == F, "F must be divisible by bins_per_semitone"
 
-        # Generate one permutation per semitone on CPU, then move to device
         perm = torch.argsort(
-            torch.rand(n_semitones, bps, generator=self.gen),
+            torch.rand(n_semitones, bps, device=device, generator=gen),
             dim=-1
-        ).to(device)
+        )
 
-        # Convert to absolute frequency indices
         perm_idx = (
             perm
             + torch.arange(n_semitones, device=device)[:, None] * bps

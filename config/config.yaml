@@ -7,7 +7,7 @@ defaults:
   - override hydra/job_logging: custom
 
 evalutation:
-  subsample_every: 100
+  subsample_every: 64
 
 hydra:
   sweeper:
