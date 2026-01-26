@@ -62,6 +62,11 @@ def evaluate_all(cfg: DictConfig):
         if idx % subsample_every != 0:
             continue
 
+        # Handle masks (if necessary)
+        if hasattr(permutation, "target"):
+            target = model.create_midi_target(item["mid_file"])
+            permutation.load_target(target)
+
         output = model.predict(item["wav_file"])
 
         # Evaluate

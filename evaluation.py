@@ -3,7 +3,10 @@ import hydra
 import mir_eval
 from hydra.utils import instantiate
 from omegaconf import DictConfig
+import logging
 
+
+log = logging.getLogger(__name__)
 
 
 def eval_model(
@@ -40,49 +43,56 @@ def eval_model(
     
 
 @hydra.main(version_base="1.3", config_path="config", config_name="config")
-def prediction_demo(cfg: DictConfig):
+def permutation_evaluation_demo(cfg: DictConfig):
     """Prediction demo function for bugfixing and testing"""
 
-    print("-- Evaluation Demo --\n")
+    log.info("-- Evaluation Demo --\n")
 
-    # Load with Hydra
+    # --- model --- 
     model = instantiate(cfg.model)
+
+    # --- dataset ---
     dataset = instantiate(cfg.dataset)
+
+    # --- permutation --- 
     permutation = instantiate(cfg.permutation)
 
-    print(f"Loaded model: {model.name}")
-    print(f"Loaded dataset: {dataset.name}")
-    print(f"Loaded permuter: {permutation.name}")
+    log.info(f"Loaded model     : {model.name}")
+    log.info(f"Loaded dataset   : {dataset.name}")
+    log.info(f"Loaded permuter  : {permutation.name}")
     
     item = dataset[0]
 
     # Pipeline
     model.load()
     model.load_hook(permutation)
-    model.clear_hooks()
+
+    if hasattr(permutation, "load_label"):
+        target = model.create_midi_target(item["mid_file"])
+        permutation.load_target(target)
+
     output = model.predict(item["wav_file"])
+    model.clear_hooks()
 
     # Evaluate
     ref_intervals, ref_pitches = dataset.create_eval_data(item["mid_file"])
     est_intervals, est_pitches = model.prepare_for_eval(output)
 
     scores = eval_model(
-        ref_intervals,
-        ref_pitches,
-        est_intervals,
-        est_pitches
+        ref_intervals, ref_pitches,
+        est_intervals, est_pitches
     )
-    print("\nEvaluation results:")
+
+    log.info("Evaluation results:\n")
     for k, v in scores.items():
-        print(f"    {k}: {round(v, 4)}")
+        log.info(f"    {k}: {round(v, 4)}")
 
     # Write MIDI (optional)
     file_path = os.path.join("./test_data", "test_mid.mid")
     model.write_midi(output, file_path)
 
-    print(f"\nPrediction successful!")
-
+    log.info(f"Prediction successful!")
 
 
 if __name__ == "__main__":
-    prediction_demo()
+    permutation_evaluation_demo()

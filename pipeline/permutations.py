@@ -8,10 +8,49 @@ import torch.nn as nn
 
 
 
+def plot_features(*args, k=0, cmap="magma"):
+    """
+    Plot one or more features for debugging and evaluation
+    """
+    features = list(args)
+    if len(features) == 0:
+        raise ValueError("No features provided")
+    
+    mats = []
+    for idx, feat in enumerate(features):
+        arr = feat.detach().cpu().numpy()
+
+        if arr.ndim != 3:
+            raise ValueError(f"Expected feature of shape [B, F, T], got {arr.shape}")
+        
+        K, F, T = arr.shape
+        if not (0 <= k < K):
+            raise IndexError(f"k out of range for feature {idx}: got {k}, expected 0 <= k < {K}")
+        
+        mat = arr[k]
+        mats.append(mat)
+
+    n = len(mats)
+    fig, axes = plt.subplots(1, n, figsize=(6 * n, 3))
+    if n == 1:
+        axes = [axes]
+
+    for i, ax in enumerate(axes):
+        im = ax.imshow(mats[i].T, aspect="auto", origin="lower", cmap=cmap)
+        ax.set_xlabel("Time")
+        ax.set_ylabel("Frequency")
+        ax.set_title(f"Spectrogram [{k}] ({i})")
+        plt.colorbar(im, ax=ax, label="Amplitude")
+
+    plt.tight_layout()
+    plt.show()
+
+
+
 """Permutations"""
 
 class Permutation(nn.Module):
-    def __init__(self, name, seed: int = 0):
+    def __init__(self, name: str, seed: Optional[int] = 0):
         """
         Base class for CQT frequency-axis permutations.
         """
@@ -44,7 +83,6 @@ class NoPermutation(Permutation):
     @torch.no_grad()
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         return x
-
 
 
 class RandomPermutation(Permutation):
@@ -148,284 +186,47 @@ class MicrotonalPermutation(Permutation):
 
 """Maskings"""
 
-class FeatureMasker(nn.Module):
-    def __init__(
-            self,
-            name: str,
-            sr: int = 22050,
-            n_overlapping_frames: int = 30,
-            fft_hop: int = 256,
-            audio_window_length: int = 2
-    ):
+
+class FeatureMasker(Permutation):
+    def __init__(self, name: str, **kwargs):
         """
-        Base class for spectrogram feature masking
+        Base class for CQT masking
         """
-        super().__init__()
-        self.name = name
-        self.fft_hop = fft_hop
-        self.fps = sr // fft_hop
-        self.audio_n_samples = sr * audio_window_length - fft_hop
-        self.n_overlapping_frames = n_overlapping_frames
-        self.bins_per_octave = 3 * 12
-        self.f_min = 27.7
+        super().__init__(name)
+        self.target = None
 
-    def load_label(self, midi_path: str):
-        """
-        Loads the MIDI as a binary piano roll and registers it as a buffer.
-        Windowing is deferred to _align_label_to_input() where actual input dimensions are known.
-        """
-        midi_data = pretty_midi.PrettyMIDI(midi_path)
-
-        duration = midi_data.get_end_time()
-
-        piano_roll = midi_data.get_piano_roll(fs=self.fps)
-        piano_roll = (piano_roll > 0).astype(np.float32)
-
-        # make piano_roll match the audio duration in annotation frames
-        n_frames_expected = int(np.ceil(duration * self.fps))
-        if piano_roll.shape[1] < n_frames_expected:
-            piano_roll = np.pad(piano_roll, ((0, 0), (0, n_frames_expected - piano_roll.shape[1])), mode="constant")
-        elif piano_roll.shape[1] > n_frames_expected:
-            piano_roll = piano_roll[:, :n_frames_expected]
-
-        # Store raw piano roll - windowing happens in _align_label_to_input
-        label_tensor = torch.from_numpy(piano_roll).float()  # [N, T_total]
-        self.register_buffer("label_raw", label_tensor)
-
-    def _align_label_to_input(self, B: int, T: int) -> torch.Tensor:
-        """
-        Window the raw piano roll to match input spectrogram dimensions.
-        
-        Args:
-            B: Number of batches (windows) from the input spectrogram
-            T: Number of time frames per window from the input spectrogram
-            
-        Returns:
-            label: Tensor of shape [B, N, T] aligned with input
-        """
-        if not hasattr(self, "label_raw"):
-            raise RuntimeError("No label_raw buffer found. Call load_label(...) first.")
-        
-        N, T_total = self.label_raw.shape
-        
-        # Calculate windowing parameters (same as basic_pitch inference)
-        overlap_len_samples = self.n_overlapping_frames * self.fft_hop
-        hop_size_samples = self.audio_n_samples - overlap_len_samples
-        
-        # Convert to annotation frames
-        hop_size_frames = hop_size_samples // self.fft_hop
-        overlap_frames = overlap_len_samples // self.fft_hop
-        
-        # Pad start to match basic_pitch's padding
-        pad_start_frames = overlap_frames // 2
-        piano_roll = torch.nn.functional.pad(self.label_raw, (pad_start_frames, 0))
-        
-        # Pad end if needed to accommodate all windows
-        T_padded = piano_roll.shape[1]
-        total_needed = (B - 1) * hop_size_frames + T
-        if total_needed > T_padded:
-            piano_roll = torch.nn.functional.pad(piano_roll, (0, total_needed - T_padded))
-        
-        # Extract windows to match input batches
-        windows = []
-        for i in range(B):
-            start = i * hop_size_frames
-            end = start + T
-            windows.append(piano_roll[:, start:end])
-        
-        return torch.stack(windows, dim=0)  # [B, N, T]
-
-    def note_to_bin(
-        self,
-        midi_notes: torch.Tensor,  # [N]
-        F: int
-    ) -> torch.Tensor:
-        """
-        Maps MIDI notes to CQT bin indices
-        """
-        freqs = 440.0 * (2.0 ** ((midi_notes - 69) / 12))
-        bins = self.bins_per_octave * torch.log2(freqs / self.f_min)
-        bins = bins.round().long()
-
-        return bins.clamp(min=0, max=F - 1)
-
-    @staticmethod
-    def build_fundamental_mask(
-        y: torch.Tensor,
-        note_bins: torch.Tensor,
-        F: int
-    ) -> torch.Tensor:
-        """
-        Returns:
-            fund_mask: BoolTensor [B, T, F]
-        """
-        B, N, T = y.shape
-        device = y.device
-
-        # [B, N, T] -> [B, T, N]
-        y_bt_n = y.permute(0, 2, 1).bool()
-
-        bins = note_bins.view(1, 1, N).expand(B, T, N)
-        fund_mask = torch.zeros(B, T, F, device=device, dtype=torch.bool)
-
-        fund_mask.scatter_(dim=2, index=bins, src=y_bt_n)
-
-        return fund_mask
-
-    def __call__(self, x: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError
-
-    def plot(
-        self,
-        x: torch.Tensor,
-        batch: int = 0,
-        figsize: Tuple[int, int] = (12, 5),
-        cmap: str = "magma",
-        label_cmap: str = "gray_r",
-        show: bool = True,
-    ):
-        """
-        Plot spectrogram x (B, T, F) and piano-roll label (B, N, T) for given batch index.
-        Returns (fig, (ax_spec, ax_label)).
-        """
-        if x.dim() != 3:
-            raise ValueError("x must be a 3D tensor with shape [B, T, F]")
-        if not hasattr(self, "label_raw"):
-            raise RuntimeError("No label_raw buffer found. Call load_label(...) before plotting.")
-
-        B, T, F = x.shape
-        # Align label to input dimensions for plotting
-        label = self._align_label_to_input(B, T)  # [B, N, T]
-
-        x_np = x[batch].detach().cpu().numpy()   # [T, F]
-        label_np = label[batch].detach().cpu().numpy()  # [N, T]
-
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
-        im1 = ax1.imshow(x_np.T, aspect="auto", origin="lower", cmap=cmap, interpolation="nearest")
-        ax1.set_title("Spectrogram (freq bins x time frames)")
-        ax1.set_xlabel("Time frames")
-        ax1.set_ylabel("Frequency bins")
-        fig.colorbar(im1, ax=ax1, fraction=0.046, pad=0.04)
-
-        im2 = ax2.imshow(label_np, aspect="auto", origin="lower", cmap=label_cmap, interpolation="nearest")
-        ax2.set_title("Piano roll (MIDI pitch x time frames)")
-        ax2.set_xlabel("Time frames")
-        ax2.set_ylabel("MIDI pitch")
-        fig.tight_layout()
-
-        if show:
-            plt.show()
-
-        return fig, (ax1, ax2)
+    def load_target(self, target: torch.Tensor) -> None:
+        self.taget = target
 
 
 class FundamentalMasking(FeatureMasker):
-    def __init__(
-        self,
-        spec_type: str = "cqt",
-        bins_per_octave: int = 3 * 12,
-        f_min: float = 27.7,
-        f_max: Optional[float] = None,
-    ):
-        """
-        Mask the fundamental frequencies of the active notes
-        """
-        super().__init__(spec_type, bins_per_octave, f_min, f_max)
+    """
+    Fundamental note frequency masker
+    """
+    def __init__(self, name: str):
+        super().__init__(name)
 
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
-        B, T, F = x.shape
-        device = x.device
-
-        # Align label to input dimensions
-        label = self._align_label_to_input(B, T)  # [B, N, T]
-        label = label.to(device)
-        N = label.shape[1]
-
-        midi = torch.arange(N, device=device)
-        note_bins = self.note_to_bin(midi, F)
-
-        fund_mask = self.build_fundamental_mask(label, note_bins, F)
-
-        x_out = x.clone()
-        x_out[fund_mask] = 0.0
-
-        self.plot(x_out, 0)
-
-        return x_out
+        return x
 
 
 class HarmonicMasking(FeatureMasker):
-    def __init__(
-        self,
-        spec_type: str = "cqt",
-        bins_per_octave: int = 3 * 12,
-        f_min: float = 27.7,
-        f_max: Optional[float] = None,
-    ):
-        """
-        Keep only the fundamental frequencies of active notes
-        """
-        super().__init__(spec_type, bins_per_octave, f_min, f_max)
+    """
+    Harmonic frequency masker
+    """
+    def __init__(self, name: str):
+        super().__init__(name)
 
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
-        B, T, F = x.shape
-        device = x.device
+        return x
+    
 
-        # Align label to input dimensions
-        label = self._align_label_to_input(B, T)  # [B, N, T]
-        label = label.to(device)
-        N = label.shape[1]
-
-        midi = torch.arange(N, device=device)
-        note_bins = self.note_to_bin(midi, F)
-
-        fund_mask = self.build_fundamental_mask(label, note_bins, F)
-
-        x_out = torch.zeros_like(x)
-        x_out[fund_mask] = x[fund_mask]
-
-        return x_out
-
-
-class SoftFundamentalMasking(FeatureMasker):
-    def __init__(
-        self,
-        spec_type: str = "cqt",
-        bins_per_octave: int = 3 * 12,
-        f_min: float = 27.7,
-        f_max: Optional[float] = None,
-        temperature: float = 0.1,
-        eps: float = 1e-8,
-    ):
-        """
-        Softly emphasize fundamental frequencies using softmax attenuation
-        """
-        super().__init__(spec_type, bins_per_octave, f_min, f_max)
-        self.temperature = temperature
-        self.eps = eps
+class SoftHarmonicMasking(FeatureMasker):
+    """
+    Soft harmonic frequency masker
+    """
+    def __init__(self, name: str):
+        super().__init__(name)
 
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
-        B, T, F = x.shape
-        device = x.device
-
-        # Align label to input dimensions
-        label = self._align_label_to_input(B, T)  # [B, N, T]
-        label = label.to(device)
-        N = label.shape[1]
-
-        midi = torch.arange(N, device=device)
-        note_bins = self.note_to_bin(midi, F)
-
-        fund_mask = self.build_fundamental_mask(label, note_bins, F)
-
-        # Build softmax scores
-        scores = torch.full_like(x, float("-inf"))
-        scores[fund_mask] = x[fund_mask] / self.temperature
-
-        # Stable softmax over frequency
-        weights = torch.softmax(scores, dim=-1)
-
-        # Attenuate
-        x_out = x * weights
-
-        return x_out
+        return x

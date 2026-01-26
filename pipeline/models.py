@@ -27,14 +27,18 @@ class BaseModel():
         self.weight_path = weight_path
 
     @abstractmethod
-    def load(self):
+    def load(self) -> None:
         return NotImplementedError
     
     @abstractmethod
-    def load_hook(self, hook):
+    def load_hook(self, hook) -> None:
         return NotImplementedError
 
-    def clear_hooks(self):
+    @abstractmethod
+    def create_midi_target(self, f_midi: str) -> torch.Tensor:
+        return NotImplementedError
+
+    def clear_hooks(self) -> None:
         if not hasattr(self, "model") or self.model is None:
             raise Exception("Hook clearing failed, model has not been loaded yet")
         for m in self.model.modules():
@@ -81,6 +85,9 @@ class BasicPitch(BaseModel):
             x_perm = hook(x)
             return (x_perm,)
         self.model.hs.register_forward_pre_hook(pre_hook)
+    
+    def create_midi_target(self, f_midi: str) -> torch.Tensor:
+        return
 
     def inference(self, wav_path: str):
         n_overlapping_frames = 30
