@@ -1,7 +1,5 @@
-from typing import Optional, Tuple
-import numpy as np
+from typing import Optional
 import matplotlib.pyplot as plt
-import pretty_midi
 
 import torch
 import torch.nn as nn
@@ -193,10 +191,10 @@ class FeatureMasker(Permutation):
         Base class for CQT masking
         """
         super().__init__(name)
-        self.target = None
+        self.register_buffer("target", None)
 
     def load_target(self, target: torch.Tensor) -> None:
-        self.taget = target
+        self.target = target
 
 
 class FundamentalMasking(FeatureMasker):
@@ -207,7 +205,20 @@ class FundamentalMasking(FeatureMasker):
         super().__init__(name)
 
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
-        return x
+        K_spec, T, N = x.shape
+        K_roll, _, _ = self.target.shape
+
+        target = self.target.to(device=x.device, dtype=x.dtype)
+
+        # Match target to x
+        pad = K_spec - K_roll
+        assert pad >= 0
+
+        pad = torch.zeros(pad, T, N, device=target.device, dtype=target.dtype)
+        target = torch.cat([target, pad], dim=0)
+        
+        # Apply mask
+        return x * (1.0 - target)
 
 
 class HarmonicMasking(FeatureMasker):
@@ -218,15 +229,73 @@ class HarmonicMasking(FeatureMasker):
         super().__init__(name)
 
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
-        return x
+        K_spec, T, N = x.shape
+        K_roll, _, _ = self.target.shape
+
+        target = self.target.to(device=x.device, dtype=x.dtype)
+
+        # Match target to x
+        pad = K_spec - K_roll
+        assert pad >= 0
+
+        pad = torch.zeros(pad, T, N, device=target.device, dtype=target.dtype)
+        target = torch.cat([target, pad], dim=0)
+        
+        # Apply mask
+        return x * target
     
 
 class SoftHarmonicMasking(FeatureMasker):
     """
     Soft harmonic frequency masker
     """
-    def __init__(self, name: str):
+    def __init__(self, name: str, a: float):
         super().__init__(name)
+        self.a = a
 
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
-        return x
+        K_spec, T, N = x.shape
+        K_roll, _, _ = self.target.shape
+
+        target = self.target.to(device=x.device, dtype=x.dtype)
+
+        # Match target to x
+        pad = K_spec - K_roll
+        assert pad >= 0
+
+        pad = torch.zeros(pad, T, N, device=target.device, dtype=target.dtype)
+        target = torch.cat([target, pad], dim=0)
+        
+        # Create softmask
+        target = self.a + (1 - self.a) * target
+        
+        # Apply mask
+        return x * target
+
+
+class SoftFundamentalMasking(FeatureMasker):
+    """
+    Soft harmonic fundamental masker
+    """
+    def __init__(self, name: str, a: float):
+        super().__init__(name)
+        self.a = a
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        K_spec, T, N = x.shape
+        K_roll, _, _ = self.target.shape
+
+        target = self.target.to(device=x.device, dtype=x.dtype)
+
+        # Match target to x
+        pad = K_spec - K_roll
+        assert pad >= 0
+
+        pad = torch.zeros(pad, T, N, device=target.device, dtype=target.dtype)
+        target = torch.cat([target, pad], dim=0)
+        
+        # Create softmask
+        target = 1.0 - (1.0 - self.a) * target
+
+        # Apply mask
+        return x * target

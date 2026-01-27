@@ -4,6 +4,7 @@ import numpy as np
 from pathlib import Path
 from typing import Tuple
 from abc import abstractmethod
+import math
 
 import torch
 from torch import nn
@@ -87,7 +88,62 @@ class BasicPitch(BaseModel):
         self.model.hs.register_forward_pre_hook(pre_hook)
     
     def create_midi_target(self, f_midi: str) -> torch.Tensor:
-        return
+        AUDIO_SAMPLE_RATE = 22050
+        FFT_HOP = 256
+        AUDIO_N_SAMPLES = 22050 * 2 - 256
+        n_overlapping_frames = 30
+        overlap_len = n_overlapping_frames * FFT_HOP
+        hop_size = AUDIO_N_SAMPLES - overlap_len
+        
+        n_frames_chunk = 172
+        bins_per_semitone = 3
+        fs = AUDIO_SAMPLE_RATE / FFT_HOP
+
+        # We have to cook bullshit algorithms instead of nice parallelized torch
+        # because basic pitch uses a float step of 141.265625
+        
+        midi = pretty_midi.PrettyMIDI(f_midi)
+        
+        # Total chunks
+        audio_duration = midi.get_end_time()
+        total_audio_samples = int(audio_duration * AUDIO_SAMPLE_RATE)
+        total_audio_samples_padded = total_audio_samples + overlap_len // 2
+        
+        n_chunks = int(np.ceil((total_audio_samples_padded - AUDIO_N_SAMPLES) / hop_size)) + 1
+        
+        # Make roll
+        roll = midi.get_piano_roll(fs=fs)
+        roll = (roll > 0).astype(np.float32)
+        roll = torch.from_numpy(roll)
+        
+        initial_pad_frames = overlap_len // 2 // FFT_HOP
+        roll = torch.nn.functional.pad(roll, (initial_pad_frames, 0, 0, 0))
+        
+        # Edit F to match basic pitch (match centered bins)
+        roll = roll[21:125, :]
+        roll = roll.repeat_interleave(bins_per_semitone, dim=0)
+        roll = roll[1:-2, :]
+        
+        # Match chunks
+        chunks = []
+        for i in range(n_chunks):
+            start_sample = i * hop_size
+            start_frame = int(round(start_sample / FFT_HOP))
+            end_frame = start_frame + n_frames_chunk
+            
+            if end_frame <= roll.shape[1]:
+                chunk = roll[:, start_frame:end_frame]
+            else:
+                chunk = torch.nn.functional.pad(
+                    roll[:, start_frame:], 
+                    (0, end_frame - roll.shape[1], 0, 0)
+                )
+            chunks.append(chunk)
+        
+        roll = torch.stack(chunks, dim=0)
+        roll = roll.permute(0, 2, 1)
+        
+        return roll
 
     def inference(self, wav_path: str):
         n_overlapping_frames = 30

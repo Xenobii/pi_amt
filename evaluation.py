@@ -61,13 +61,13 @@ def permutation_evaluation_demo(cfg: DictConfig):
     log.info(f"Loaded dataset   : {dataset.name}")
     log.info(f"Loaded permuter  : {permutation.name}")
     
-    item = dataset[0]
+    item = dataset[3]
 
     # Pipeline
     model.load()
     model.load_hook(permutation)
 
-    if hasattr(permutation, "load_label"):
+    if hasattr(permutation, "target"):
         target = model.create_midi_target(item["mid_file"])
         permutation.load_target(target)
 
