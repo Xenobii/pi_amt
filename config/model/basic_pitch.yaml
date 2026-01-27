@@ -1,5 +1,5 @@
 name: Basic Pitch
-_target_: pipeline.models.BasicPitch
+_target_: pipeline.models.BasicPitchWrapper
 
 weight_path: models/basic_pitch/assets/basic_pitch_pytorch_icassp_2022.pth
 

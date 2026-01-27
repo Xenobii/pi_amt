@@ -4,3 +4,6 @@
 [submodule "models/of_alt"]
 	path = models/of_alt
 	url = https://github.com/w4k2/automatic_music_transcription.git
+[submodule "models/timbre_trap"]
+	path = models/timbre_trap
+	url = https://github.com/sony/timbre-trap.git

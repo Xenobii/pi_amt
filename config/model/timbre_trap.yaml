@@ -1,0 +1,7 @@
+name: Timbre-Trap
+_target_: pipeline.models.TimbreTrapWrapper
+
+weight_path: models/weights/tt-orig.pt
+
+inference_settings:
+  frame_threshold: 0.5

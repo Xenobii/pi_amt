@@ -46,7 +46,7 @@ def eval_model(
 def permutation_evaluation_demo(cfg: DictConfig):
     """Prediction demo function for bugfixing and testing"""
 
-    log.info("-- Evaluation Demo --\n")
+    log.info("-- Evaluation Demo --")
 
     # --- model --- 
     model = instantiate(cfg.model)
