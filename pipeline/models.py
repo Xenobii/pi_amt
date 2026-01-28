@@ -2,7 +2,7 @@ import sys
 import pretty_midi
 import numpy as np
 from pathlib import Path
-from typing import Tuple
+from typing import Tuple, Optional
 from abc import abstractmethod
 from scipy.ndimage import maximum_filter1d
 import librosa
@@ -16,9 +16,17 @@ pretty_midi.pretty_midi.MAX_TICK = 1e10
 
 
 class BaseModel():
-    def __init__(self, name: str, weight_path: str) -> None:
+    def __init__(
+            self,
+            name: str,
+            weight_path: str,
+            target_shape: str,
+            complex: Optional[bool] = False
+    ) -> None:
         self.name = name
         self.weight_path = weight_path
+        self.target_shape = target_shape
+        self.complex = complex
 
     @abstractmethod
     def load(self) -> None:
@@ -32,6 +40,10 @@ class BaseModel():
     def create_midi_target(self, f_midi: str) -> torch.Tensor:
         return NotImplementedError
 
+    @abstractmethod
+    def predict(self, wav_path: str):
+        return NotImplementedError
+   
     def clear_hooks(self) -> None:
         if not hasattr(self, "model") or self.model is None:
             raise Exception("Hook clearing failed, model has not been loaded yet")
@@ -46,10 +58,6 @@ class BaseModel():
                             setattr(m, attr, {})
                         except Exception:
                             pass
-    
-    @abstractmethod
-    def predict(self, wav_path: str):
-        return NotImplementedError
     
     def prepare_for_eval(self, midi_data: pretty_midi.PrettyMIDI) -> Tuple[np.array, np.array]:
         """
@@ -67,13 +75,17 @@ class BaseModel():
         
         return np.array(intervals), np.array(pitches)
     
-    def write_midi(self, midi_data: pretty_midi.PrettyMIDI, file_path: str):
+    def write_midi(self, midi_data: pretty_midi.PrettyMIDI, file_path: str) -> None:
         midi_data.write(file_path)
 
 
 class BasicPitchWrapper(BaseModel):
-    def __init__(self, name, weight_path, **kwargs):
-        super().__init__(name, weight_path)
+    def __init__(self, name, weight_path, target_shape, **kwargs):
+        super().__init__(
+            name=name, 
+            weight_path=weight_path,
+            target_shape=target_shape
+        )
 
         self.inference_settings = kwargs.get("inference_settings")
         self.modules = kwargs.get("modules")
@@ -208,17 +220,20 @@ class BasicPitchWrapper(BaseModel):
         return midi_data
     
 
-
 class TimbreTrapWrapper(BaseModel):
-    def __init__(self, name, weight_path, **kwargs):
-        super().__init__(name, weight_path)
+    def __init__(self, name, weight_path, target_shape, complex, **kwargs):
+        super().__init__(
+            name=name,
+            weight_path=weight_path,
+            target_shape=target_shape,
+            complex=complex
+        )
 
         self.inference_settings = kwargs.get("inference_settings")
         self.n_octaves = 9
         self.bins_per_octave = 60
         self.sample_rate = 22050 
         self.secs_per_block = 3 
-
 
     def load(self):
         tt_path = Path(__file__).resolve().parents[1] / "models" / "timbre_trap"
@@ -293,25 +308,7 @@ class TimbreTrapWrapper(BaseModel):
                     bin_idx = np.argmin(np.abs(midi_freqs - pitch_midi))
                     activations[bin_idx, frame_idx] = 1.0
         
-        return torch.from_numpy(activations)
-
-
-
-    def _load_audio(self, wav_path: str) -> torch.Tensor:
-        wave, sr = torchaudio.load(wav_path)
-        
-        wave = torchaudio.functional.resample(wave, sr, 22050)
-        
-        wave = torch.mean(wave, axis=0, keepdim=True)
-        
-        if torch.cuda.is_available():
-            wave = wave.cuda()
-
-        wave /= wave.abs().max()
-
-        wave = wave.unsqueeze(0)
-
-        return wave
+        return torch.from_numpy(activations).unsqueeze(0)
 
     def inference(self, wav_path: str) -> torch.Tensor:
         # Load audio
@@ -339,6 +336,23 @@ class TimbreTrapWrapper(BaseModel):
         midi_data = self._activations_to_midi(activations, times, midi_freqs)
         
         return midi_data
+
+
+    def _load_audio(self, wav_path: str) -> torch.Tensor:
+        wave, sr = torchaudio.load(wav_path)
+        
+        wave = torchaudio.functional.resample(wave, sr, 22050)
+        
+        wave = torch.mean(wave, axis=0, keepdim=True)
+        
+        if torch.cuda.is_available():
+            wave = wave.cuda()
+
+        wave /= wave.abs().max()
+
+        wave = wave.unsqueeze(0)
+
+        return wave
 
     def _filter_non_peaks(self, activations: np.ndarray) -> np.ndarray:
         max_filtered = maximum_filter1d(activations, size=3, axis=0, mode='constant')

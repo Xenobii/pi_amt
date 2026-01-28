@@ -3,5 +3,11 @@ _target_: pipeline.models.TimbreTrapWrapper
 
 weight_path: models/weights/tt-orig.pt
 
+target_shape: b f t
+target_range:
+  - -1
+  - 1
+complex: true
+
 inference_settings:
   frame_threshold: 0.5

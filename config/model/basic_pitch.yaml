@@ -3,6 +3,9 @@ _target_: pipeline.models.BasicPitchWrapper
 
 weight_path: models/basic_pitch/assets/basic_pitch_pytorch_icassp_2022.pth
 
+target_shape: b t f
+complex: false
+
 inference_settings:
   onset_thresh: 0.5
   frame_thresh: 0.3

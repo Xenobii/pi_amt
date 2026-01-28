@@ -50,15 +50,18 @@ def permutation_evaluation_demo(cfg: DictConfig):
 
     # --- model --- 
     model = instantiate(cfg.model)
+    log.info(f"Loaded model     : {model.name}")
+
+    # --- adapter ---
+    adapter = instantiate(cfg.adapter, model.target_shape)
+    log.info(f"Target shape     : {model.target_shape}")
 
     # --- dataset ---
     dataset = instantiate(cfg.dataset)
+    log.info(f"Loaded dataset   : {dataset.name}")
 
     # --- permutation --- 
-    permutation = instantiate(cfg.permutation)
-
-    log.info(f"Loaded model     : {model.name}")
-    log.info(f"Loaded dataset   : {dataset.name}")
+    permutation = instantiate(cfg.permutation, adapter=adapter, complex=model.complex)
     log.info(f"Loaded permuter  : {permutation.name}")
     
     item = dataset[3]

@@ -6,6 +6,9 @@ defaults:
 
   - override hydra/job_logging: custom
 
+adapter:
+  _target_: pipeline.permutations.InputAdapter
+
 evalutation:
   subsample_every: 64
 

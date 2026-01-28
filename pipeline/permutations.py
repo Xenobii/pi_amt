@@ -1,12 +1,14 @@
-from typing import Optional
+from typing import Optional, List
 import matplotlib.pyplot as plt
+from einops import rearrange
+import numpy as np
 
 import torch
 import torch.nn as nn
 
 
 
-def plot_features(*args, k=0, cmap="magma"):
+def plot_features(*args, k=0, cmap="magma", bipolar=False):
     """
     Plot one or more features for debugging and evaluation
     """
@@ -26,6 +28,8 @@ def plot_features(*args, k=0, cmap="magma"):
             raise IndexError(f"k out of range for feature {idx}: got {k}, expected 0 <= k < {K}")
         
         mat = arr[k]
+        if bipolar:
+            mat = np.abs(mat)
         mats.append(mat)
 
     n = len(mats)
@@ -45,17 +49,56 @@ def plot_features(*args, k=0, cmap="magma"):
 
 
 
+"""Adapters"""
+
+class InputAdapter(nn.Module):
+    """
+    Einops based adapter
+    
+    Canonical shape: "b t f"
+    Target shape MUST BE INVERTABLE
+    """
+    def __init__(
+            self,
+            target_shape: Optional[str] = "b t f",
+            canonical_shape: Optional[str] = "b t f",
+    ) -> None:
+        self._to_shape   = f"{target_shape} -> {canonical_shape}"
+        self._from_shape = f"{canonical_shape} -> {target_shape}"
+
+    @torch.no_grad()
+    def to_canonical(self, x: torch.Tensor) -> torch.Tensor:
+        if self._to_shape is None:
+            return x
+        return rearrange(x, self._to_shape)
+    
+    @torch.no_grad()
+    def from_canonical(self, x: torch.Tensor) -> torch.Tensor:
+        if self._from_shape is None:
+            return x
+        return rearrange(x, self._from_shape)
+
+
 """Permutations"""
 
 class Permutation(nn.Module):
-    def __init__(self, name: str, seed: Optional[int] = 0):
-        """
-        Base class for CQT frequency-axis permutations.
-        """
+    """
+    Base class for frequency-axis permutations.
+    """
+    def __init__(
+            self,
+            name: str,
+            adapter: Optional[nn.Module] = nn.Identity(),
+            complex: Optional[bool] = False,
+            seed: Optional[int] = 0,
+    ):
         super().__init__()
-        self.name = name
-        self.seed = int(seed)
-        self._gens = {}
+        self.name    = name
+        self.seed    = int(seed)
+        self.adapter = adapter
+        self.complex = complex
+        
+        self._gens   = {}
 
     def _get_generator(self, device: torch.device) -> torch.Tensor:
         if device not in self._gens:
@@ -64,37 +107,61 @@ class Permutation(nn.Module):
             self._gens[device] = gen
         return self._gens[device]
     
-    def __call__(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        x: [B, T, F]
-        """
+    def permute(self, x: torch.Tensor) -> torch.Tensor:
         return NotImplementedError
+    
+    @torch.no_grad()
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.complex:
+            assert x.shape[1] == 2, f"Expected dim1 of input to be 2, got {x.shape[1]}"
+            x, x_i = torch.unbind(x, dim=1)
+        
+        x = self.adapter.to_canonical(x)
+        x = self.permute(x)
+        x = self.adapter.from_canonical(x)
+
+        if self.complex:
+            x = torch.stack([x, x_i], dim=1)
+
+        return x
 
 
 class NoPermutation(Permutation):
-    def __init__(self, name: str, **kwargs):
-        """
-        Identity permutation
-        """
-        super().__init__(name)
+    """
+    Identity permutation
+    """
+    def __init__(
+            self,
+            name: str,
+            complex: Optional[bool] = False,
+            **kwargs
+    ):
+        super().__init__(name=name, complex=complex, **kwargs)
     
-    @torch.no_grad()
-    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+    def permute(self, x: torch.Tensor) -> torch.Tensor:
         return x
 
 
 class RandomPermutation(Permutation):
-    def __init__(self, name: str, p: float=0.1, seed: int=0, **kwargs):
-        """
-        Random per-frame bin swapping.
+    """
+    Random per-frame bin swapping.
 
-        p: probability of swapping a given bin with another bin
-        """
-        super().__init__(name, seed)
+    p: probability of swapping a given bin with another bin
+    """
+    def __init__(
+            self,
+            name: str,
+            adapter: nn.Module,
+            p: float = 0.1,
+            seed: Optional[int] = 0,
+            complex: Optional[bool] = False,
+            **kwargs
+    ):
+        super().__init__(name=name, adapter=adapter, complex=complex, seed=seed)
+        
         self.p = p
-
-    @torch.no_grad()
-    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+    
+    def permute(self, x: torch.Tensor) -> torch.Tensor:
         B, T, F = x.shape
         device = x.device
         gen = self._get_generator(device)
@@ -117,17 +184,25 @@ class RandomPermutation(Permutation):
 
 
 class HighFreqPermutation(Permutation):
-    def __init__(self, name: str, start: int, seed: int = 0):
-        """
-        Permutes only high-frequency bins (>= start percentage),
-        independently per frame.
-        """
-        super().__init__(name, seed)
+    """
+    Permutes only high-frequency bins (>= start percentage),
+    independently per frame.
+    """
+    def __init__(
+            self,
+            name: str,
+            adapter: nn.Module,
+            start: float = 0.0,
+            seed: int = 0,
+            complex: Optional[bool] = False,
+            **kwargs
+    ):
+        super().__init__(name=name, adapter=adapter, seed=seed, complex=complex)
+        
         assert 0.0 < start < 1.0
         self.start = start
 
-    @torch.no_grad()
-    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+    def permute(self, x: torch.Tensor) -> torch.Tensor:
         B, T, F = x.shape
         device = x.device
         gen = self._get_generator(device)
@@ -149,17 +224,24 @@ class HighFreqPermutation(Permutation):
 
 
 class MicrotonalPermutation(Permutation):
-    def __init__(self, name: str, bins_per_semitone: int, seed: int = 0):
-        """
-        Permutes bins within each semitone group.
+    """
+    Permutes bins within each semitone group.
 
-        bins_per_semitone: number of CQT bins per semitone
-        """
-        super().__init__(name, seed)
+    bins_per_semitone: number of CQT bins per semitone
+    """
+    def __init__(
+            self, name: str,
+            adapter: nn.Module,
+            bins_per_semitone: int = 1,
+            seed: int = 0,
+            complex: Optional[bool] = False,
+            **kwargs
+    ):
+        super().__init__(name=name, adapter=adapter, seed=seed, complex=complex)
         self.bins_per_semitone = bins_per_semitone
 
     @torch.no_grad()
-    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+    def permute(self, x: torch.Tensor) -> torch.Tensor:
         B, T, F = x.shape
         device = x.device
         gen = self._get_generator(device)
@@ -186,11 +268,18 @@ class MicrotonalPermutation(Permutation):
 
 
 class FeatureMasker(Permutation):
-    def __init__(self, name: str, **kwargs):
-        """
-        Base class for CQT masking
-        """
-        super().__init__(name)
+    """
+    Base class for spectrogram masking
+    """
+    def __init__(
+            self,
+            name: str,
+            adapter: nn.Module,
+            seed: Optional[int] = 0,
+            complex: Optional[bool] = False,
+            **kwargs
+    ):
+        super().__init__(name=name, adapter=adapter, seed=seed, complex=complex)
         self.register_buffer("target", None)
 
     def load_target(self, target: torch.Tensor) -> None:
@@ -201,10 +290,17 @@ class FundamentalMasking(FeatureMasker):
     """
     Fundamental note frequency masker
     """
-    def __init__(self, name: str):
-        super().__init__(name)
+    def __init__(
+            self,
+            name: str,
+            adapter: nn.Module,
+            seed: Optional[int] = 0,
+            complex: Optional[bool] = False,
+            **kwargs
+    ):
+        super().__init__(name=name, adapter=adapter, seed=seed, complex=complex)
 
-    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+    def permute(self, x: torch.Tensor) -> torch.Tensor:
         K_spec, T, N = x.shape
         K_roll, _, _ = self.target.shape
 
@@ -225,10 +321,17 @@ class HarmonicMasking(FeatureMasker):
     """
     Harmonic frequency masker
     """
-    def __init__(self, name: str):
-        super().__init__(name)
+    def __init__(
+            self,
+            name: str,
+            adapter: nn.Module,
+            seed: Optional[int] = 0,
+            complex: Optional[bool] = False,
+            **kwargs
+    ):
+        super().__init__(name=name, adapter=adapter, seed=seed, complex=complex)
 
-    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+    def permute(self, x: torch.Tensor) -> torch.Tensor:
         K_spec, T, N = x.shape
         K_roll, _, _ = self.target.shape
 
@@ -249,11 +352,19 @@ class SoftHarmonicMasking(FeatureMasker):
     """
     Soft harmonic frequency masker
     """
-    def __init__(self, name: str, a: float):
-        super().__init__(name)
+    def __init__(
+            self,
+            name: str,
+            a: float,
+            adapter: nn.Module,
+            seed: Optional[int] = 0,
+            complex: Optional[bool] = False,
+            **kwargs
+    ):
+        super().__init__(name, adapter, seed, complex=complex)
         self.a = a
-
-    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        
+    def permute(self, x: torch.Tensor) -> torch.Tensor:
         K_spec, T, N = x.shape
         K_roll, _, _ = self.target.shape
 
@@ -277,11 +388,19 @@ class SoftFundamentalMasking(FeatureMasker):
     """
     Soft harmonic fundamental masker
     """
-    def __init__(self, name: str, a: float):
-        super().__init__(name)
+    def __init__(
+            self,
+            name: str,
+            a: float,
+            adapter: nn.Module,
+            seed: Optional[int] = 0,
+            complex: Optional[bool] = False,
+            **kwargs
+    ):
+        super().__init__(name=name, adapter=adapter, seed=seed, complex=complex)
         self.a = a
 
-    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+    def permute(self, x: torch.Tensor) -> torch.Tensor:
         K_spec, T, N = x.shape
         K_roll, _, _ = self.target.shape
 

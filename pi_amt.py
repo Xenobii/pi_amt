@@ -36,23 +36,30 @@ def save_metrics(scores: dict, model_name: str, permutation_name: str, dataset_n
 
 @hydra.main(version_base="1.3", config_path="config", config_name="config")
 def evaluate_all(cfg: DictConfig):
-    log.info("-- Permutation Importance in Multi-Pitch Estimation --")
+    log.info("--- Permutation Importance in Multi-Pitch Estimation ---")
     
-    # Load modules
-    model       = instantiate(cfg.model)
-    dataset     = instantiate(cfg.dataset)
-    permutation = instantiate(cfg.permutation)
+    # --- model ---
+    model = instantiate(cfg.model)
+    log.info(f"Model        : {model.name}")
 
-    log.info(f"Model    : {model.name}")
-    log.info(f"Dataset  : {dataset.name}")
-    log.info(f"Permuter : {permutation.name}")
+    # --- adapter ---
+    adapter = instantiate(cfg.adapter, model.target_shape)
+    log.info(f"Target shape : {model.target_shape}")
+    
+    # --- dataset --- 
+    dataset = instantiate(cfg.dataset)
+    log.info(f"Dataset      : {dataset.name}")
+
+    # --- permutation ---
+    permutation = instantiate(cfg.permutation, adapter=adapter, complex=model.complex)
+    log.info(f"Permutation   : {permutation.name}")
 
     # Load model
     model.load()
     model.load_hook(permutation)
-    metrics = defaultdict(list)
     
     # Evalutation pipeline
+    metrics = defaultdict(list)
     subsample_every = cfg.evalutation.subsample_every
     for idx, item in enumerate(tqdm(
         dataset,
@@ -86,13 +93,13 @@ def evaluate_all(cfg: DictConfig):
 
     avg_scores = {k: np.mean(vs) for k, vs in metrics.items()}
 
-    log.info("\nEvaluation results:")
+    log.info("--- Evaluation results ---:")
     for k, v in avg_scores.items():
         log.info(f"    {k}: {round(v, 4)}")
 
     save_metrics(avg_scores, model.name, permutation.name, dataset.name)
 
-    log.info("-- Evaluation Successful! --\n")
+    log.info("--- Evaluation Successful! ---")
 
 
 if __name__=="__main__":
