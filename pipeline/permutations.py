@@ -97,6 +97,8 @@ class Permutation(nn.Module):
         self.seed    = int(seed)
         self.adapter = adapter
         self.complex = complex
+
+        self.batch_idx = 0
         
         self._gens   = {}
 
@@ -286,6 +288,30 @@ class FeatureMasker(Permutation):
         self.target = target
 
 
+    def _match_target_to_input(self, x: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        K_spec, T_spec, N = x.shape
+        K_roll, T_roll, _ = target.shape
+
+        target = target.to(device=x.device, dtype=x.dtype)
+
+        # Match target to x
+        dK = K_spec - K_roll
+        dT = T_spec - T_roll
+
+        assert dK >= 0, f"Expected K_spec({K_spec}) > K_roll({K_roll})"
+        assert dT >= 0, f"Expected T_spec({T_spec}) > T_roll({T_roll})"
+
+        if (dK > 0):
+            pad_K = torch.zeros(dK, T_roll, N, device=target.device, dtype=target.dtype)
+            target = torch.cat([target, pad_K], dim=0)
+        
+        if (dT > 0):
+            pad_T = torch.zeros(K_spec, dT, N, device=target.device, dtype=target.dtype)
+            target = torch.cat([target, pad_T], dim=1)
+
+        return target
+
+
 class FundamentalMasking(FeatureMasker):
     """
     Fundamental note frequency masker
@@ -301,17 +327,7 @@ class FundamentalMasking(FeatureMasker):
         super().__init__(name=name, adapter=adapter, seed=seed, complex=complex)
 
     def permute(self, x: torch.Tensor) -> torch.Tensor:
-        K_spec, T, N = x.shape
-        K_roll, _, _ = self.target.shape
-
-        target = self.target.to(device=x.device, dtype=x.dtype)
-
-        # Match target to x
-        pad = K_spec - K_roll
-        assert pad >= 0
-
-        pad = torch.zeros(pad, T, N, device=target.device, dtype=target.dtype)
-        target = torch.cat([target, pad], dim=0)
+        target = self._match_target_to_input(x, self.target)
         
         # Apply mask
         return x * (1.0 - target)
@@ -332,17 +348,7 @@ class HarmonicMasking(FeatureMasker):
         super().__init__(name=name, adapter=adapter, seed=seed, complex=complex)
 
     def permute(self, x: torch.Tensor) -> torch.Tensor:
-        K_spec, T, N = x.shape
-        K_roll, _, _ = self.target.shape
-
-        target = self.target.to(device=x.device, dtype=x.dtype)
-
-        # Match target to x
-        pad = K_spec - K_roll
-        assert pad >= 0
-
-        pad = torch.zeros(pad, T, N, device=target.device, dtype=target.dtype)
-        target = torch.cat([target, pad], dim=0)
+        target = self._match_target_to_input(x, self.target)
         
         # Apply mask
         return x * target
@@ -365,17 +371,7 @@ class SoftHarmonicMasking(FeatureMasker):
         self.a = a
         
     def permute(self, x: torch.Tensor) -> torch.Tensor:
-        K_spec, T, N = x.shape
-        K_roll, _, _ = self.target.shape
-
-        target = self.target.to(device=x.device, dtype=x.dtype)
-
-        # Match target to x
-        pad = K_spec - K_roll
-        assert pad >= 0
-
-        pad = torch.zeros(pad, T, N, device=target.device, dtype=target.dtype)
-        target = torch.cat([target, pad], dim=0)
+        target = self._match_target_to_input(x, self.target)
         
         # Create softmask
         target = self.a + (1 - self.a) * target
@@ -401,17 +397,7 @@ class SoftFundamentalMasking(FeatureMasker):
         self.a = a
 
     def permute(self, x: torch.Tensor) -> torch.Tensor:
-        K_spec, T, N = x.shape
-        K_roll, _, _ = self.target.shape
-
-        target = self.target.to(device=x.device, dtype=x.dtype)
-
-        # Match target to x
-        pad = K_spec - K_roll
-        assert pad >= 0
-
-        pad = torch.zeros(pad, T, N, device=target.device, dtype=target.dtype)
-        target = torch.cat([target, pad], dim=0)
+        target = self._match_target_to_input(x, self.target)
         
         # Create softmask
         target = 1.0 - (1.0 - self.a) * target

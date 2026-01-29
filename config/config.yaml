@@ -15,5 +15,6 @@ evalutation:
 hydra:
   sweeper:
     params:
-      permutation: high_freq, random, no_permutation, microtonal
-      dataset: maps, maestro
+      model: timbre_trap, basic_pitch
+      permutation: high_freq, random, no_permutation, microtonal, fund_mask, harm_mask, soft_fund_mask, soft_harm_mask
+      dataset: maps

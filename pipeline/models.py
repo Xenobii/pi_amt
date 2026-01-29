@@ -81,11 +81,7 @@ class BaseModel():
 
 class BasicPitchWrapper(BaseModel):
     def __init__(self, name, weight_path, target_shape, **kwargs):
-        super().__init__(
-            name=name, 
-            weight_path=weight_path,
-            target_shape=target_shape
-        )
+        super().__init__(name=name, weight_path=weight_path, target_shape=target_shape)
 
         self.inference_settings = kwargs.get("inference_settings")
         self.modules = kwargs.get("modules")
@@ -268,54 +264,117 @@ class TimbreTrapWrapper(BaseModel):
             return (x_perm,)
         self.model.encoder.register_forward_pre_hook(pre_hook)
 
-    def create_midi_target(self, f_midi: str) -> torch.Tensor:
-        midi = pretty_midi.PrettyMIDI(f_midi)
+    def create_midi_target_(self, f_midi: str) -> torch.Tensor:
+        sr = 22050
+        secs_per_block = 3
+        n_octaves = 9
+        bins_per_octave = 60
 
-        n_bins = self.n_octaves * self.bins_per_octave
-        fmin = librosa.hz_to_midi((self.sample_rate / 2) / (2 ** self.n_octaves))
-        midi_freqs = fmin + np.arange(n_bins) / (self.bins_per_octave / 12)
+        block_length = int(sr * secs_per_block)
+        n_bins = n_octaves * bins_per_octave
+        max_window_length = 1024
+        hop_length_samples = block_length / max_window_length
+
+        chunk_hop_samples = block_length // 2
+        n_frames_chunk = max_window_length
+
+        fmin_hz = (sr / 2) / (2 ** n_octaves)
+        fmin_midi = librosa.hz_to_midi(fmin_hz)
+        midi_freqs = fmin_midi + np.arange(n_bins) / (bins_per_octave / 12)
+
+        midi = pretty_midi.PrettyMIDI(f_midi)
         
         audio_duration = midi.get_end_time()
-        num_samples = int(audio_duration * self.sample_rate)
+        total_audio_samples = int(audio_duration * sr)
+        total_audio_samples_padded = total_audio_samples + 2 * chunk_hop_samples
         
-        block_length = int(self.secs_per_block * self.sample_rate)
-        block_length = 2 ** int(np.ceil(np.log2(block_length)))
-        max_window_length = block_length // 2
-        hop_length = block_length / max_window_length
+        n_chunks = (total_audio_samples_padded - chunk_hop_samples) // chunk_hop_samples
         
-        n_frames = int(np.ceil((num_samples / block_length) * max_window_length))
+        fs = sr / hop_length_samples
+        roll = midi.get_piano_roll(fs=fs)
+        roll = (roll > 0).astype(np.float32)
+        roll = torch.from_numpy(roll)
         
-        times = np.arange(n_frames) * hop_length / self.sample_rate
+        initial_pad_frames = int(chunk_hop_samples / hop_length_samples)
+        roll = torch.nn.functional.pad(roll, (initial_pad_frames, 0, 0, 0))
         
-        multi_pitch = [np.empty(0)] * n_frames
+        roll_matched = torch.zeros((n_bins, roll.shape[1]))
+        for i, midi_freq in enumerate(midi_freqs):
+            closest_midi = int(np.round(midi_freq))
+            if 0 <= closest_midi < roll.shape[0]:
+                roll_matched[i, :] = roll[closest_midi, :]
         
-        for instrument in midi.instruments:
-            if instrument.is_drum:
-                continue
-            for note in instrument.notes:
-                pitch_hz = librosa.midi_to_hz(note.pitch)
-                onset, offset = note.start, note.end
-                
-                for i in np.where((times >= onset) & (times < offset))[0]:
-                    multi_pitch[i] = np.append(multi_pitch[i], pitch_hz)
+        roll = roll_matched
         
-        activations = np.zeros((n_bins, n_frames), dtype=np.float32)
+        chunks = []
+        for i in range(n_chunks):
+            sample_start = i * chunk_hop_samples
+            frame_start = int(sample_start / hop_length_samples)
+            frame_stop = frame_start + n_frames_chunk
+            
+            if frame_stop <= roll.shape[1]:
+                chunk = roll[:, frame_start:frame_stop]
+            else:
+                chunk = torch.nn.functional.pad(
+                    roll[:, frame_start:],
+                    (0, frame_stop - roll.shape[1], 0, 0)
+                )
+            
+            if chunk.shape[1] < n_frames_chunk:
+                chunk = torch.nn.functional.pad(
+                    chunk,
+                    (0, n_frames_chunk - chunk.shape[1], 0, 0)
+                )
+            elif chunk.shape[1] > n_frames_chunk:
+                chunk = chunk[:, :n_frames_chunk]
+            
+            chunks.append(chunk)
         
-        for frame_idx, pitches in enumerate(multi_pitch):
-            for pitch_hz in pitches:
-                pitch_midi = librosa.hz_to_midi(pitch_hz)
-                if pitch_midi >= midi_freqs[0] and pitch_midi <= midi_freqs[-1]:
-                    bin_idx = np.argmin(np.abs(midi_freqs - pitch_midi))
-                    activations[bin_idx, frame_idx] = 1.0
+        roll = torch.stack(chunks, dim=0)
+        roll = roll.permute(0, 2, 1)
+        return roll
+    
+    def create_midi_target(self, f_midi: str) -> torch.Tensor:
+        sr = 22050
+        secs_per_block = 3
+        n_octaves = 9
+        bins_per_octave = 60
+
+        block_length = int(sr * secs_per_block)
+        n_bins = n_octaves * bins_per_octave
+        max_window_length = 1024
+        hop_length_samples = block_length / max_window_length
+
+        fmin_hz = (sr / 2) / (2 ** n_octaves)
+        fmin_midi = librosa.hz_to_midi(fmin_hz)
+        midi_freqs = fmin_midi + np.arange(n_bins) / (bins_per_octave / 12)
+
+        midi = pretty_midi.PrettyMIDI(f_midi)
         
-        return torch.from_numpy(activations).unsqueeze(0)
+        fs = sr / hop_length_samples
+        roll = midi.get_piano_roll(fs=fs)
+        roll = (roll > 0).astype(np.float32)
+        roll = torch.from_numpy(roll)
+        
+        roll_matched = torch.zeros((n_bins, roll.shape[1]))
+        for i, midi_freq in enumerate(midi_freqs):
+            closest_midi = int(np.round(midi_freq))
+            if 0 <= closest_midi < roll.shape[0]:
+                roll_matched[i, :] = roll[closest_midi, :]
+        
+        roll = roll_matched.unsqueeze(0)  # [1, F, T]
+        
+        return roll.permute(0, 2, 1)
 
     def inference(self, wav_path: str) -> torch.Tensor:
         # Load audio
         wave = self._load_audio(wav_path)
 
         # Transcribe
-        activations = self.model.transcribe(wave)
+        # activations = self.model.transcribe(wave)
+        coeff = self.model.inference(wave, True)
+        activations = self.model.to_activations(coeff)
+
         """
         Output: {[B, P, T]}
         """

@@ -64,7 +64,7 @@ def permutation_evaluation_demo(cfg: DictConfig):
     permutation = instantiate(cfg.permutation, adapter=adapter, complex=model.complex)
     log.info(f"Loaded permuter  : {permutation.name}")
     
-    item = dataset[3]
+    item = dataset[1]
 
     # Pipeline
     model.load()
@@ -86,7 +86,7 @@ def permutation_evaluation_demo(cfg: DictConfig):
         est_intervals, est_pitches
     )
 
-    log.info("Evaluation results:\n")
+    log.info("Evaluation results:")
     for k, v in scores.items():
         log.info(f"    {k}: {round(v, 4)}")
 
