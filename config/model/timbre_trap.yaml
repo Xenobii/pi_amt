@@ -4,10 +4,15 @@ _target_: pipeline.models.TimbreTrapWrapper
 weight_path: models/weights/tt-orig.pt
 
 target_shape: b f t
-target_range:
-  - -1
-  - 1
 complex: true
 
+# Model specifics
+sr: 22050
+secs_per_block: 3
+n_octaves: 9
+bins_per_octave: 60
+max_window_length: 1024
+
+# Inference settings
 inference_settings:
   frame_threshold: 0.5

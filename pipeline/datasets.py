@@ -84,3 +84,32 @@ class MAESTRO(MyDataset):
             "wav_file": wav_file,
             "mid_file": mid_file,
         }
+    
+
+
+class URMP(MyDataset):
+    def __init__(self, name: str, data_folder):
+        super().__init__(name)
+        self.files = [
+            os.path.join(data_folder, d)
+            for d in os.listdir(data_folder)
+            if os.path.isdir(os.path.join(data_folder, d))
+        ]
+
+    def __len__(self):
+        return len(self.files)
+    
+    def __getitem__(self, idx) -> Dict[str, str]:
+        wav_file = os.path.join(
+            self.files[idx],
+            "AuMix_" + os.path.basename(self.files[idx]) + ".wav"
+        )
+        mid_file = os.path.join(
+            self.files[idx],
+            "Sco_" + os.path.basename(self.files[idx]) + ".mid"
+        )
+
+        return {
+            "wav_file": wav_file,
+            "mid_file": mid_file,
+        }

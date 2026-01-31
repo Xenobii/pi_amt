@@ -6,6 +6,14 @@ weight_path: models/basic_pitch/assets/basic_pitch_pytorch_icassp_2022.pth
 target_shape: b t f
 complex: false
 
+# Model specifics
+sr: 22050
+fft_hop: 256
+n_overlapping_frames: 30
+n_frames_chunk: 172
+bins_per_semitone: 3
+
+# Inference settings
 inference_settings:
   onset_thresh: 0.5
   frame_thresh: 0.3

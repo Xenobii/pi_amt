@@ -83,8 +83,13 @@ class BasicPitchWrapper(BaseModel):
     def __init__(self, name, weight_path, target_shape, **kwargs):
         super().__init__(name=name, weight_path=weight_path, target_shape=target_shape)
 
-        self.inference_settings = kwargs.get("inference_settings")
-        self.modules = kwargs.get("modules")
+        self.sr                   = kwargs.get("sr", 22050)
+        self.fft_hop              = kwargs.get("fft_hop", 256)
+        self.n_overlapping_frames = kwargs.get("n_overlapping_frames", 30)
+        self.n_frames_chunk       = kwargs.get("n_frames_chunk", 172)
+        self.bins_per_semitone    = kwargs.get("bins_per_semitone", 3)
+        
+        self.inference_settings   = kwargs.get("inference_settings")
 
     def load(self):
         bp_path = Path(__file__).resolve().parents[1] / "models" / "basic_pitch"
@@ -118,16 +123,16 @@ class BasicPitchWrapper(BaseModel):
         self.model.hs.register_forward_pre_hook(pre_hook)
     
     def create_midi_target(self, f_midi: str) -> torch.Tensor:
-        AUDIO_SAMPLE_RATE = 22050
-        FFT_HOP = 256
-        AUDIO_N_SAMPLES = 22050 * 2 - 256
-        n_overlapping_frames = 30
-        overlap_len = n_overlapping_frames * FFT_HOP
-        hop_size = AUDIO_N_SAMPLES - overlap_len
+        sr                   = self.sr
+        fft_hop              = self.fft_hop
+        n_frames_chunk       = self.n_frames_chunk
+        bins_per_semitone    = self.bins_per_semitone
+        n_overlapping_frames = self.n_overlapping_frames
         
-        n_frames_chunk = 172
-        bins_per_semitone = 3
-        fs = AUDIO_SAMPLE_RATE / FFT_HOP
+        fs              = sr / fft_hop
+        audio_n_samples = sr * 2 - fft_hop
+        overlap_len     = n_overlapping_frames * fft_hop
+        hop_size        = audio_n_samples - overlap_len
 
         # We have to cook bullshit algorithms instead of nice parallelized torch
         # because basic pitch uses a float step of 141.265625
@@ -136,17 +141,17 @@ class BasicPitchWrapper(BaseModel):
         
         # Total chunks
         audio_duration = midi.get_end_time()
-        total_audio_samples = int(audio_duration * AUDIO_SAMPLE_RATE)
+        total_audio_samples = int(audio_duration * sr)
         total_audio_samples_padded = total_audio_samples + overlap_len // 2
         
-        n_chunks = int(np.ceil((total_audio_samples_padded - AUDIO_N_SAMPLES) / hop_size)) + 1
+        n_chunks = int(np.ceil((total_audio_samples_padded - audio_n_samples) / hop_size)) + 1
         
         # Make roll
         roll = midi.get_piano_roll(fs=fs)
         roll = (roll > 0).astype(np.float32)
         roll = torch.from_numpy(roll)
         
-        initial_pad_frames = overlap_len // 2 // FFT_HOP
+        initial_pad_frames = overlap_len // 2 // fft_hop
         roll = torch.nn.functional.pad(roll, (initial_pad_frames, 0, 0, 0))
         
         # Edit F to match basic pitch (match centered bins)
@@ -158,7 +163,7 @@ class BasicPitchWrapper(BaseModel):
         chunks = []
         for i in range(n_chunks):
             start_sample = i * hop_size
-            start_frame = int(round(start_sample / FFT_HOP))
+            start_frame = int(round(start_sample / fft_hop))
             end_frame = start_frame + n_frames_chunk
             
             if end_frame <= roll.shape[1]:
@@ -176,10 +181,10 @@ class BasicPitchWrapper(BaseModel):
         return roll
 
     def inference(self, wav_path: str) -> torch.Tensor:
-        n_overlapping_frames = 30
-        overlap_len = n_overlapping_frames * 256
-        audio_n_samples = 22050 * 2 - 256
-        hop_size = audio_n_samples - overlap_len
+        n_overlapping_frames = self.n_overlapping_frames
+        overlap_len          = n_overlapping_frames * self.fft_hop
+        audio_n_samples      = self.sr * 2 - self.fft_hop
+        hop_size             = audio_n_samples - overlap_len
 
         # Window audio
         audio_windowed, _, audio_original_length = self.get_audio_input(wav_path, overlap_len, hop_size)
@@ -218,18 +223,16 @@ class BasicPitchWrapper(BaseModel):
 
 class TimbreTrapWrapper(BaseModel):
     def __init__(self, name, weight_path, target_shape, complex, **kwargs):
-        super().__init__(
-            name=name,
-            weight_path=weight_path,
-            target_shape=target_shape,
-            complex=complex
-        )
+        super().__init__(name=name, weight_path=weight_path, target_shape=target_shape, complex=complex)
+
+        self.sr                = kwargs.get("sr", 22050)
+        self.n_octaves         = kwargs.get("n_octaves", 9)
+        self.bins_per_octave   = kwargs.get("bins_per_octave", 60)
+        self.sample_rate       = kwargs.get("sample_rate", 22050)
+        self.secs_per_block    = kwargs.get("secs_per_block", 3)
+        self.max_window_length = kwargs.get("max_window_length", 1024)
 
         self.inference_settings = kwargs.get("inference_settings")
-        self.n_octaves = 9
-        self.bins_per_octave = 60
-        self.sample_rate = 22050 
-        self.secs_per_block = 3 
 
     def load(self):
         tt_path = Path(__file__).resolve().parents[1] / "models" / "timbre_trap"
@@ -335,14 +338,14 @@ class TimbreTrapWrapper(BaseModel):
         return roll
     
     def create_midi_target(self, f_midi: str) -> torch.Tensor:
-        sr = 22050
-        secs_per_block = 3
-        n_octaves = 9
-        bins_per_octave = 60
+        sr                = self.sr
+        secs_per_block    = self.secs_per_block
+        n_octaves         = self.n_octaves
+        bins_per_octave   = self.bins_per_octave
+        max_window_length = self.max_window_length
 
-        block_length = int(sr * secs_per_block)
-        n_bins = n_octaves * bins_per_octave
-        max_window_length = 1024
+        block_length       = int(sr * secs_per_block)
+        n_bins             = n_octaves * bins_per_octave
         hop_length_samples = block_length / max_window_length
 
         fmin_hz = (sr / 2) / (2 ** n_octaves)

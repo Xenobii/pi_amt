@@ -1,0 +1,3 @@
+name: URMP
+_target_: pipeline.datasets.URMP
+data_folder: datasets/urmp
