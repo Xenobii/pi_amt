@@ -4,3 +4,4 @@ outputs
 datasets/*
 multirun
 test.py
+quiz.md

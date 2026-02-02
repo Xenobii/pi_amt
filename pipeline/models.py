@@ -375,6 +375,7 @@ class TimbreTrapWrapper(BaseModel):
 
         # Transcribe
         # activations = self.model.transcribe(wave)
+        # wave = self.model.sliCQ.pad_to_block_length(wave)
         coeff = self.model.inference(wave, True)
         activations = self.model.to_activations(coeff)
 

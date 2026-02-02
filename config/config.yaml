@@ -10,11 +10,11 @@ adapter:
   _target_: pipeline.permutations.InputAdapter
 
 evalutation:
-  subsample_every: 64
+  subsample_every: 10
 
 hydra:
   sweeper:
     params:
-      model: timbre_trap, basic_pitch
+      model: basic_pitch, timbre_trap
       permutation: high_freq, random, no_permutation, microtonal, fund_mask, harm_mask, soft_fund_mask, soft_harm_mask
       dataset: maps, maestro
