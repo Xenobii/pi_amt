@@ -78,6 +78,80 @@ class BaseModel():
     def write_midi(self, midi_data: pretty_midi.PrettyMIDI, file_path: str) -> None:
         midi_data.write(file_path)
 
+    def _align_midi_F(
+            self,
+            roll: torch.Tensor,
+            bins_per_semitone: int, 
+            fmin: Optional[float] = 27.5,
+            n_bins: int = None,
+            center_bins: bool = True
+    ) -> torch.Tensor:
+        min_bin = int(librosa.hz_to_midi(fmin))
+
+        roll = roll[min_bin:, :]
+        roll = roll.repeat_interleave(bins_per_semitone, dim=0)
+        
+        if center_bins:
+            shift = bins_per_semitone // 2
+            diff = bins_per_semitone % 2
+            roll = roll[shift:-(shift+diff), :]
+
+        if n_bins < roll.shape[0]:
+            roll = roll[:n_bins, :]
+        elif n_bins > roll.shape[0]:
+            roll = torch.nn.functional.pad(roll, (0, 0, 0, n_bins-roll.shape[0]))
+            
+        return roll
+
+    def _align_midi_T(
+            self,
+            roll: torch.Tensor,
+            sr: int,
+            fft_hop: int,
+            n_secs_chunk: float,
+            n_frames_overlap: int,
+            n_frames_offset: int = 0,
+            lazy_chunking: bool = False,
+    ) -> torch.Tensor:
+        # Compute windowing parameters
+        _, T = roll.shape
+        
+        n_samples_chunk   = sr * n_secs_chunk - fft_hop
+        n_samples_overlap = n_frames_overlap * fft_hop
+        n_samples_hop     = n_samples_chunk - 2 * n_samples_overlap
+
+        n_frames_hop   = int(n_samples_hop / fft_hop)
+        n_frames_chunk = int(n_secs_chunk * sr / fft_hop)
+        n_chunks       = int(np.floor((T - n_frames_chunk) / n_frames_hop)) + 1
+        
+        # Pad 
+        pad_len = n_chunks * n_frames_chunk - T
+        roll = torch.nn.functional.pad(roll, (n_frames_offset, 0, 0, 0))
+        roll = torch.nn.functional.pad(roll, (0, pad_len, 0, 0))
+        roll = torch.nn.functional.pad(roll, (n_frames_overlap, 0, 0, 0))
+
+        # Chunk roll
+        if lazy_chunking:
+            roll = roll.unfold(
+                dimension=1,
+                size=n_frames_chunk,
+                step=n_frames_hop
+            )
+            roll = roll.permute(1, 2, 0).contiguous()
+        else: 
+            chunks = []
+            for i in range(n_chunks):
+                start_sample = i * n_samples_hop
+                start_frame = int(round(start_sample / fft_hop))
+                end_frame = start_frame + n_frames_chunk
+                chunk = roll[:, start_frame: end_frame]
+                chunks.append(chunk)
+            
+            roll = torch.stack(chunks, dim=0)
+            roll = roll.permute(0, 2, 1)
+
+        return roll
+
 
 class BasicPitchWrapper(BaseModel):
     def __init__(self, name, weight_path, target_shape, **kwargs):
@@ -123,60 +197,38 @@ class BasicPitchWrapper(BaseModel):
         self.model.hs.register_forward_pre_hook(pre_hook)
     
     def create_midi_target(self, f_midi: str) -> torch.Tensor:
-        sr                   = self.sr
-        fft_hop              = self.fft_hop
-        n_frames_chunk       = self.n_frames_chunk
-        bins_per_semitone    = self.bins_per_semitone
-        n_overlapping_frames = self.n_overlapping_frames
-        
-        fs              = sr / fft_hop
-        audio_n_samples = sr * 2 - fft_hop
-        overlap_len     = n_overlapping_frames * fft_hop
-        hop_size        = audio_n_samples - overlap_len
+        sr                = self.sr
+        fft_hop           = self.fft_hop
+        bins_per_semitone = self.bins_per_semitone
+        fs                = sr // fft_hop
 
-        # We have to cook bullshit algorithms instead of nice parallelized torch
-        # because basic pitch uses a float step of 141.265625
-        
+        # Load MIDI 
         midi = pretty_midi.PrettyMIDI(f_midi)
-        
-        # Total chunks
-        audio_duration = midi.get_end_time()
-        total_audio_samples = int(audio_duration * sr)
-        total_audio_samples_padded = total_audio_samples + overlap_len // 2
-        
-        n_chunks = int(np.ceil((total_audio_samples_padded - audio_n_samples) / hop_size)) + 1
         
         # Make roll
         roll = midi.get_piano_roll(fs=fs)
         roll = (roll > 0).astype(np.float32)
         roll = torch.from_numpy(roll)
         
-        initial_pad_frames = overlap_len // 2 // fft_hop
-        roll = torch.nn.functional.pad(roll, (initial_pad_frames, 0, 0, 0))
+        # Align F
+        roll = self._align_midi_F(
+            roll,
+            bins_per_semitone=bins_per_semitone,
+            fmin=27.5,
+            n_bins=309,
+            center_bins=True
+        )
         
-        # Edit F to match basic pitch (match centered bins)
-        roll = roll[21:125, :]
-        roll = roll.repeat_interleave(bins_per_semitone, dim=0)
-        roll = roll[1:-2, :]
-        
-        # Match chunks
-        chunks = []
-        for i in range(n_chunks):
-            start_sample = i * hop_size
-            start_frame = int(round(start_sample / fft_hop))
-            end_frame = start_frame + n_frames_chunk
-            
-            if end_frame <= roll.shape[1]:
-                chunk = roll[:, start_frame:end_frame]
-            else:
-                chunk = torch.nn.functional.pad(
-                    roll[:, start_frame:], 
-                    (0, end_frame - roll.shape[1], 0, 0)
-                )
-            chunks.append(chunk)
-        
-        roll = torch.stack(chunks, dim=0)
-        roll = roll.permute(0, 2, 1)
+        # Align T + chunk
+        roll = self._align_midi_T(
+            roll,
+            sr=sr,
+            fft_hop=fft_hop,
+            n_secs_chunk=2,
+            n_frames_overlap=15,
+            n_frames_offset=1,
+            lazy_chunking=False
+        )
         
         return roll
 
@@ -267,121 +319,77 @@ class TimbreTrapWrapper(BaseModel):
             return (x_perm,)
         self.model.encoder.register_forward_pre_hook(pre_hook)
 
-    def create_midi_target_(self, f_midi: str) -> torch.Tensor:
-        sr = 22050
-        secs_per_block = 3
-        n_octaves = 9
-        bins_per_octave = 60
-
-        block_length = int(sr * secs_per_block)
-        n_bins = n_octaves * bins_per_octave
-        max_window_length = 1024
-        hop_length_samples = block_length / max_window_length
-
-        chunk_hop_samples = block_length // 2
-        n_frames_chunk = max_window_length
-
-        fmin_hz = (sr / 2) / (2 ** n_octaves)
-        fmin_midi = librosa.hz_to_midi(fmin_hz)
-        midi_freqs = fmin_midi + np.arange(n_bins) / (bins_per_octave / 12)
-
-        midi = pretty_midi.PrettyMIDI(f_midi)
-        
-        audio_duration = midi.get_end_time()
-        total_audio_samples = int(audio_duration * sr)
-        total_audio_samples_padded = total_audio_samples + 2 * chunk_hop_samples
-        
-        n_chunks = (total_audio_samples_padded - chunk_hop_samples) // chunk_hop_samples
-        
-        fs = sr / hop_length_samples
-        roll = midi.get_piano_roll(fs=fs)
-        roll = (roll > 0).astype(np.float32)
-        roll = torch.from_numpy(roll)
-        
-        initial_pad_frames = int(chunk_hop_samples / hop_length_samples)
-        roll = torch.nn.functional.pad(roll, (initial_pad_frames, 0, 0, 0))
-        
-        roll_matched = torch.zeros((n_bins, roll.shape[1]))
-        for i, midi_freq in enumerate(midi_freqs):
-            closest_midi = int(np.round(midi_freq))
-            if 0 <= closest_midi < roll.shape[0]:
-                roll_matched[i, :] = roll[closest_midi, :]
-        
-        roll = roll_matched
-        
-        chunks = []
-        for i in range(n_chunks):
-            sample_start = i * chunk_hop_samples
-            frame_start = int(sample_start / hop_length_samples)
-            frame_stop = frame_start + n_frames_chunk
-            
-            if frame_stop <= roll.shape[1]:
-                chunk = roll[:, frame_start:frame_stop]
-            else:
-                chunk = torch.nn.functional.pad(
-                    roll[:, frame_start:],
-                    (0, frame_stop - roll.shape[1], 0, 0)
-                )
-            
-            if chunk.shape[1] < n_frames_chunk:
-                chunk = torch.nn.functional.pad(
-                    chunk,
-                    (0, n_frames_chunk - chunk.shape[1], 0, 0)
-                )
-            elif chunk.shape[1] > n_frames_chunk:
-                chunk = chunk[:, :n_frames_chunk]
-            
-            chunks.append(chunk)
-        
-        roll = torch.stack(chunks, dim=0)
-        roll = roll.permute(0, 2, 1)
-        return roll
-    
     def create_midi_target(self, f_midi: str) -> torch.Tensor:
         sr                = self.sr
-        secs_per_block    = self.secs_per_block
-        n_octaves         = self.n_octaves
-        bins_per_octave   = self.bins_per_octave
-        max_window_length = self.max_window_length
+        bins_per_semitone = int(self.bins_per_octave / 12)
+        fft_hop           = 64.59
+        fs                = sr // fft_hop
 
-        block_length       = int(sr * secs_per_block)
-        n_bins             = n_octaves * bins_per_octave
-        hop_length_samples = block_length / max_window_length
-
-        fmin_hz = (sr / 2) / (2 ** n_octaves)
-        fmin_midi = librosa.hz_to_midi(fmin_hz)
-        midi_freqs = fmin_midi + np.arange(n_bins) / (bins_per_octave / 12)
-
+        # Load MIDI 
         midi = pretty_midi.PrettyMIDI(f_midi)
         
-        fs = sr / hop_length_samples
+        # Make roll
         roll = midi.get_piano_roll(fs=fs)
         roll = (roll > 0).astype(np.float32)
         roll = torch.from_numpy(roll)
         
-        roll_matched = torch.zeros((n_bins, roll.shape[1]))
-        for i, midi_freq in enumerate(midi_freqs):
-            closest_midi = int(np.round(midi_freq))
-            if 0 <= closest_midi < roll.shape[0]:
-                roll_matched[i, :] = roll[closest_midi, :]
-        
-        roll = roll_matched.unsqueeze(0)  # [1, F, T]
-        
-        return roll.permute(0, 2, 1)
+        # Align F
+        roll = self._align_midi_F(
+            roll,
+            bins_per_semitone=bins_per_semitone,
+            fmin=22,
+            n_bins=540,
+            center_bins=False
+        )
+        # Align T + chunk
+        roll = self._align_midi_T(
+            roll,
+            sr=sr,
+            fft_hop=fft_hop,
+            n_secs_chunk=3,
+            n_frames_overlap=256,
+            n_frames_offset=256,
+            lazy_chunking=False
+        )
 
+        return roll
+    
     def inference(self, wav_path: str) -> torch.Tensor:
-        # Load audio
-        wave = self._load_audio(wav_path)
+        wave = self._load_audio(wav_path).to(next(self.model.parameters()).device)
+        device = wave.device
 
-        # Transcribe
-        # activations = self.model.transcribe(wave)
-        # wave = self.model.sliCQ.pad_to_block_length(wave)
-        coeff = self.model.inference(wave, True)
-        activations = self.model.to_activations(coeff)
+        block_length   = self.model.sliCQ.block_length
+        n_frames_chunk = self.model.sliCQ.max_window_length
+        hop_frames     = n_frames_chunk // 2
 
-        """
-        Output: {[B, P, T]}
-        """
+        hop_length = block_length // 2
+        audio = torch.nn.functional.pad(wave, [hop_length] * 2)
+        n_chunks = (audio.size(-1) - hop_length) // hop_length
+
+        # build batched chunks
+        chunks = [audio[..., i * hop_length : i * hop_length + block_length] for i in range(n_chunks)]
+        audio_batch = torch.cat(chunks, dim=0)
+
+        coeff_batch = self.model._inference(audio_batch, transcribe=True)  
+        n_frames = self.model.sliCQ.get_expected_frames(audio.size(-1))
+
+        window = torch.signal.windows.hann(n_frames_chunk, device=device).view(1, 1, 1, -1)
+        coeff_win = coeff_batch * window  
+
+        starts = (torch.arange(coeff_win.shape[0], device=device) * hop_frames).unsqueeze(1) 
+        idxs = torch.arange(n_frames_chunk, device=device).unsqueeze(0)  
+        positions = starts + idxs  
+
+        index = positions.view(coeff_win.shape[0], 1, 1, n_frames_chunk).expand(-1, coeff_win.shape[1], coeff_win.shape[2], -1)
+
+        chunks_acc = torch.zeros((coeff_win.shape[0], coeff_win.shape[1], coeff_win.shape[2], n_frames), device=device)
+        chunks_acc.scatter_add_(-1, index, coeff_win)
+
+        coefficients = chunks_acc.sum(dim=0, keepdim=True) 
+
+        coefficients = coefficients[..., n_frames_chunk // 2 : -n_frames_chunk // 2]
+
+        activations = self.model.to_activations(coefficients)
         return activations
 
     def predict(self, wav_path: str):
