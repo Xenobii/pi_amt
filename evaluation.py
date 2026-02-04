@@ -64,17 +64,12 @@ def permutation_evaluation_demo(cfg: DictConfig):
     permutation = instantiate(cfg.permutation, adapter=adapter, complex=model.complex)
     log.info(f"Loaded permuter  : {permutation.name}")
     
-    item = dataset[1]
+    item = dataset[0]
 
     # Pipeline
     model.load()
     model.load_hook(permutation)
-
-    if hasattr(permutation, "target"):
-        target = model.create_midi_target(item["mid_file"])
-        permutation.load_target(target)
-
-    output = model.predict(item["wav_file"])
+    output = model.predict(item["wav_file"], item["mid_file"], chunked=False)
     model.clear_hooks()
 
     # Evaluate

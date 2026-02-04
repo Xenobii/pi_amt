@@ -284,7 +284,7 @@ class FeatureMasker(Permutation):
         super().__init__(name=name, adapter=adapter, seed=seed, complex=complex)
         self.register_buffer("target", None)
 
-    def load_target(self, target: torch.Tensor) -> None:
+    def load_target(self, target: torch.Tensor, chunked: bool = True) -> None:
         self.target = target
 
 
@@ -298,12 +298,11 @@ class FeatureMasker(Permutation):
         dK = K_spec - K_roll
         dT = T_spec - T_roll
 
-        assert dK >= 0, f"Expected K_spec({K_spec}) > K_roll({K_roll})"
-        assert dT >= 0, f"Expected T_spec({T_spec}) > T_roll({T_roll})"
-
         if (dK > 0):
             pad_K = torch.zeros(dK, T_roll, N, device=target.device, dtype=target.dtype)
             target = torch.cat([target, pad_K], dim=0)
+        if (dK < 0):
+            target = target[:K_spec, ...]
         
         if (dT > 0):
             pad_T = torch.zeros(K_spec, dT, N, device=target.device, dtype=target.dtype)

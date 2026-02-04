@@ -10,7 +10,9 @@ adapter:
   _target_: pipeline.permutations.InputAdapter
 
 evalutation:
-  subsample_every: 10
+  subsample_every: 500
+
+chunked_inference: True
 
 hydra:
   sweeper:

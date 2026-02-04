@@ -10,9 +10,63 @@ import librosa
 import torch
 from torch import nn
 import torchaudio
-
+import matplotlib.pyplot as plt
 
 pretty_midi.pretty_midi.MAX_TICK = 1e10
+
+
+'''
+prediction pipeline:
+
+input: wav_path, (optional) midi_path
+
+1. process audio, midi
+2. load midi target to hook (permutation)
+3. inference
+4. convert prediction to midi
+
+output: midi object
+'''
+
+
+def plot_features(*args, k=0, cmap="magma", bipolar=False):
+    """
+    Plot one or more features for debugging and evaluation
+    """
+    features = list(args)
+    if len(features) == 0:
+        raise ValueError("No features provided")
+    
+    mats = []
+    for idx, feat in enumerate(features):
+        arr = feat.detach().cpu().numpy()
+
+        if arr.ndim != 3:
+            raise ValueError(f"Expected feature of shape [B, F, T], got {arr.shape}")
+        
+        K, F, T = arr.shape
+        if not (0 <= k < K):
+            raise IndexError(f"k out of range for feature {idx}: got {k}, expected 0 <= k < {K}")
+        
+        mat = arr[k]
+        if bipolar:
+            mat = np.abs(mat)
+        mats.append(mat)
+
+    n = len(mats)
+    fig, axes = plt.subplots(1, n, figsize=(6 * n, 3))
+    if n == 1:
+        axes = [axes]
+
+    for i, ax in enumerate(axes):
+        im = ax.imshow(mats[i].T, aspect="auto", origin="lower", cmap=cmap)
+        ax.set_xlabel("Time")
+        ax.set_ylabel("Frequency")
+        ax.set_title(f"Spectrogram [{k}] ({i})")
+        plt.colorbar(im, ax=ax, label="Amplitude")
+
+    plt.tight_layout()
+    plt.show()
 
 
 class BaseModel():
@@ -33,15 +87,23 @@ class BaseModel():
         return NotImplementedError
     
     @abstractmethod
-    def load_hook(self, hook) -> None:
+    def load_hook(self, hook: nn.Module) -> None:
         return NotImplementedError
 
     @abstractmethod
-    def create_midi_target(self, f_midi: str) -> torch.Tensor:
+    def create_midi_target(self, f_midi: str, n_chunks: int, len_chunk: int) -> torch.Tensor:
         return NotImplementedError
 
     @abstractmethod
-    def predict(self, wav_path: str):
+    def inferece(self, wav_path: str, midi_path: Optional[str]):
+        return NotImplementedError
+
+    @abstractmethod
+    def chunked_inferece(self, wav_path: str, midi_path: Optional[str]):
+        return NotImplementedError
+    
+    @abstractmethod
+    def predict(self, wav_path: str, midi_path: Optional[str], chunked: bool) -> pretty_midi.PrettyMIDI:
         return NotImplementedError
    
     def clear_hooks(self) -> None:
@@ -120,15 +182,15 @@ class BaseModel():
         n_samples_overlap = n_frames_overlap * fft_hop
         n_samples_hop     = n_samples_chunk - 2 * n_samples_overlap
 
-        n_frames_hop   = int(n_samples_hop / fft_hop)
         n_frames_chunk = int(n_secs_chunk * sr / fft_hop)
-        n_chunks       = int(np.floor((T - n_frames_chunk) / n_frames_hop)) + 1
+        n_frames_hop   = int(n_samples_hop / fft_hop)
+
+        T_padded = T + n_frames_offset + n_frames_overlap
+        n_chunks = int(np.ceil((T_padded - n_frames_chunk) / n_frames_hop)) + 1
         
         # Pad 
-        pad_len = n_chunks * n_frames_chunk - T
-        roll = torch.nn.functional.pad(roll, (n_frames_offset, 0, 0, 0))
-        roll = torch.nn.functional.pad(roll, (0, pad_len, 0, 0))
-        roll = torch.nn.functional.pad(roll, (n_frames_overlap, 0, 0, 0))
+        pad_len = n_chunks * n_frames_chunk - T_padded
+        roll = torch.nn.functional.pad(roll, (n_frames_overlap + n_frames_offset, pad_len, 0, 0))
 
         # Chunk roll
         if lazy_chunking:
@@ -163,7 +225,8 @@ class BasicPitchWrapper(BaseModel):
         self.n_frames_chunk       = kwargs.get("n_frames_chunk", 172)
         self.bins_per_semitone    = kwargs.get("bins_per_semitone", 3)
         
-        self.inference_settings   = kwargs.get("inference_settings")
+        self.inference_settings = kwargs.get("inference_settings")
+        self.batch_size         = kwargs.get("batch_size", 4)
 
     def load(self):
         bp_path = Path(__file__).resolve().parents[1] / "models" / "basic_pitch"
@@ -189,14 +252,15 @@ class BasicPitchWrapper(BaseModel):
         if torch.cuda.is_available():
             self.model.cuda()
 
-    def load_hook(self, hook: nn.Module):
+    def load_hook(self, hook):
+        self.hook = hook
         def pre_hook(module: nn.Module, inputs: Tuple[torch.Tensor, ...]) -> Tuple[torch.Tensor, ...]:
             (x,) = inputs
-            x_perm = hook(x)
+            x_perm = self.hook(x)
             return (x_perm,)
         self.model.hs.register_forward_pre_hook(pre_hook)
     
-    def create_midi_target(self, f_midi: str) -> torch.Tensor:
+    def create_midi_target(self, f_midi, n_chunks = 0, len_chunk = 0):
         sr                = self.sr
         fft_hop           = self.fft_hop
         bins_per_semitone = self.bins_per_semitone
@@ -229,10 +293,21 @@ class BasicPitchWrapper(BaseModel):
             n_frames_offset=1,
             lazy_chunking=False
         )
-        
+        # roll: [B, T, F]
+
+        # Chunk
+        if n_chunks != 0:
+            B, T, F = roll.shape
+            pad = n_chunks * len_chunk - B
+
+            roll = torch.nn.functional.pad(roll, (0, 0, 0, 0, 0, pad))
+            roll = roll.view(n_chunks, len_chunk, T, F)
+            # roll: [n_chunks, len_chunks, T, F]
+            
         return roll
 
-    def inference(self, wav_path: str) -> torch.Tensor:
+    def inference(self, wav_path, midi_path) -> torch.Tensor:
+        # Prepare audio
         n_overlapping_frames = self.n_overlapping_frames
         overlap_len          = n_overlapping_frames * self.fft_hop
         audio_n_samples      = self.sr * 2 - self.fft_hop
@@ -241,8 +316,19 @@ class BasicPitchWrapper(BaseModel):
         # Window audio
         audio_windowed, _, audio_original_length = self.get_audio_input(wav_path, overlap_len, hop_size)
         audio_windowed = torch.from_numpy(audio_windowed.copy()).T
+        
+        # Move to gpu
         if torch.cuda.is_available():
             audio_windowed = audio_windowed.cuda()
+
+        # Create target
+        target = None
+        if midi_path is not None and hasattr(self.hook, "load_target"):
+            target = self.create_midi_target(midi_path, n_chunks=0)
+        
+        # Load target
+        if target is not None:
+            self.hook.load_target(target)
 
         # Infer
         output = self.model(audio_windowed)
@@ -260,10 +346,80 @@ class BasicPitchWrapper(BaseModel):
             for k in output
         }
         return unwrapped_output
-    
-    def predict(self, wav_path: str) -> pretty_midi.PrettyMIDI:
+
+    def chunked_inferece(self, wav_path, midi_path) -> torch.Tensor:
+        # Prepare audio
+        n_overlapping_frames = self.n_overlapping_frames
+        overlap_len          = n_overlapping_frames * self.fft_hop
+        audio_n_samples      = self.sr * 2 - self.fft_hop
+        hop_size             = audio_n_samples - overlap_len
+        batch_size           = self.batch_size
+
+        # Window audio
+        audio_windowed, _, audio_original_length = self.get_audio_input(wav_path, overlap_len, hop_size)
+        audio_windowed = torch.from_numpy(audio_windowed.copy()).T
+
+        # Chunk
+        chunks = torch.split(audio_windowed, batch_size, dim=0)
+
+        outputs_onset   = []
+        outputs_contour = []
+        outputs_note    = []
+
+        n_chunks = len(chunks)
+        len_chunk = self.batch_size
+
+        # Create target
+        targets = None
+        if midi_path is not None and hasattr(self.hook, "load_target"):
+            targets = self.create_midi_target(midi_path, n_chunks, len_chunk)
+
+        for i in range(n_chunks):
+            chunk = chunks[i]
+            
+            # Move to gpu
+            if torch.cuda.is_available():
+                chunk = chunk.cuda()
+            
+            # Load target
+            if targets is not None:
+                target = targets[i]
+                self.hook.load_target(target)
+
+            # Inference
+            with torch.no_grad():
+                output = self.model(chunk)
+                
+            outputs_onset.append(output['onset'].cpu())
+            outputs_contour.append(output['contour'].cpu())
+            outputs_note.append(output['note'].cpu())
+
+        # Merge
+        onset   = torch.cat(outputs_onset, dim=0)
+        frame   = torch.cat(outputs_note, dim=0)
+        contour = torch.cat(outputs_contour, dim=0)
+        output  = {"onset":onset, "contour":contour, "note":frame}
+        """ 
+        Output: {
+            'onset'  : [B, T, P],
+            'note'   : [B, T, P],
+            'contour': [B, T, 3*P]
+        }
+        """
+        
+        # Unwrap audio
+        unwrapped_output = {
+            k: self.unwrap_output(output[k], audio_original_length, n_overlapping_frames)
+            for k in output
+        }
+        return unwrapped_output
+
+    def predict(self, wav_path, midi_path, chunked = None):
         # Run inference
-        model_output = self.inference(wav_path)
+        if chunked:
+            model_output = self.chunked_inferece(wav_path, midi_path)
+        else:
+            model_output = self.inference(wav_path, midi_path)
 
         # Convert to midi
         midi_data, _ = self.infer.model_output_to_notes(
@@ -285,6 +441,7 @@ class TimbreTrapWrapper(BaseModel):
         self.max_window_length = kwargs.get("max_window_length", 1024)
 
         self.inference_settings = kwargs.get("inference_settings")
+        self.batch_size         = kwargs.get("bach_size", 2)
 
     def load(self):
         tt_path = Path(__file__).resolve().parents[1] / "models" / "timbre_trap"
@@ -312,14 +469,15 @@ class TimbreTrapWrapper(BaseModel):
         if torch.cuda.is_available():
             self.model.cuda()
 
-    def load_hook(self, hook: nn.Module):
+    def load_hook(self, hook):
+        self.hook = hook
         def pre_hook(module: nn.Module, inputs: Tuple[torch.Tensor, ...]) -> Tuple[torch.Tensor, ...]:
             (x,) = inputs
-            x_perm = hook(x)
+            x_perm = self.hook(x)
             return (x_perm,)
         self.model.encoder.register_forward_pre_hook(pre_hook)
 
-    def create_midi_target(self, f_midi: str) -> torch.Tensor:
+    def create_midi_target(self, f_midi, n_chunks = 0, len_chunk = 0):
         sr                = self.sr
         bins_per_semitone = int(self.bins_per_octave / 12)
         fft_hop           = 64.59
@@ -351,10 +509,25 @@ class TimbreTrapWrapper(BaseModel):
             n_frames_offset=256,
             lazy_chunking=False
         )
+        # roll: [B, T, F]
+
+        if n_chunks != 0:
+            B, T, F = roll.shape
+            pad = n_chunks * len_chunk - B
+
+            roll = torch.nn.functional.pad(roll, (0, 0, 0, 0, 0, pad))
+            roll = roll.view(n_chunks, len_chunk, T, F)
+            # roll: [num_chunks, len_chunk, T, F]
 
         return roll
     
-    def inference(self, wav_path: str) -> torch.Tensor:
+    def inference(self, wav_path, midi_path) -> torch.Tensor:
+        # Handle target
+        target = None
+        if midi_path is not None and hasattr(self.hook, "load_target"):
+            target = self.create_midi_target(midi_path, n_chunks=0)
+
+        # Prepare audio
         wave = self._load_audio(wav_path).to(next(self.model.parameters()).device)
         device = wave.device
 
@@ -366,13 +539,22 @@ class TimbreTrapWrapper(BaseModel):
         audio = torch.nn.functional.pad(wave, [hop_length] * 2)
         n_chunks = (audio.size(-1) - hop_length) // hop_length
 
-        # build batched chunks
+        # Window audio
         chunks = [audio[..., i * hop_length : i * hop_length + block_length] for i in range(n_chunks)]
         audio_batch = torch.cat(chunks, dim=0)
 
+        # Load target
+        if target is not None:
+            self.hook.load_target(target)
+
+        # Infer
         coeff_batch = self.model._inference(audio_batch, transcribe=True)  
         n_frames = self.model.sliCQ.get_expected_frames(audio.size(-1))
-
+        """
+        Output: [B, 2, F, T]
+        """
+        
+        # Unwrap audio
         window = torch.signal.windows.hann(n_frames_chunk, device=device).view(1, 1, 1, -1)
         coeff_win = coeff_batch * window  
 
@@ -392,11 +574,72 @@ class TimbreTrapWrapper(BaseModel):
         activations = self.model.to_activations(coefficients)
         return activations
 
-    def predict(self, wav_path: str):
-        # Run inference
-        activations = self.inference(wav_path)
-        activations = activations.squeeze(0).cpu().numpy()
+    def chunked_inferece(self, wav_path, midi_path) -> torch.Tensor:
+        # Prepare audio
+        wave = self._load_audio(wav_path)
+        device = wave.device
+        B, F = wave.size(0), self.model.sliCQ.n_bins
 
+        wave = self.model.sliCQ.pad_to_block_length(wave)
+
+        hop_length = self.model.sliCQ.block_length // 2
+        wave = torch.nn.functional.pad(wave, [hop_length] * 2)
+        n_chunks = (wave.size(-1) - hop_length) // hop_length
+        n_frames_chunk = self.model.sliCQ.max_window_length
+        window = torch.signal.windows.hann(n_frames_chunk, device=device)
+
+        # Window audio
+        n_frames = self.model.sliCQ.get_expected_frames(wave.size(-1))
+        coefficients = torch.zeros((B, 2, F, n_frames), device=device)
+
+        # Create target
+        targets = None
+        if midi_path is not None and hasattr(self.hook, "load_target"):
+            targets = self.create_midi_target(midi_path, n_chunks, 1)
+
+        for i in range(n_chunks):
+            # Load target
+            if targets is not None:
+                target = targets[i]
+                self.hook.load_target(target)
+
+            # Window audio
+            sample_start = i * hop_length
+            sample_stop = sample_start + self.model.sliCQ.block_length
+
+            audio_chunk = wave[..., sample_start : sample_stop]
+
+            # Inference
+            with torch.no_grad():
+                output_chunk = self.model._inference(audio_chunk, True)
+            """
+            Output: [B, 2, F, T]
+            """
+
+            frame_start = i * n_frames_chunk // 2
+            frame_stop = frame_start + n_frames_chunk
+
+            # Apply windowing and add chunk
+            coefficients[..., frame_start : frame_stop] += window * output_chunk
+
+        # Unwrap
+        coefficients = coefficients[..., n_frames_chunk // 2 :-n_frames_chunk // 2]
+        
+        # Convert to activations
+        activations = self.model.to_activations(coefficients)
+        
+        return activations
+
+    def predict(self, wav_path, midi_path, chunked):
+        # Run inference
+        if chunked:
+            activations = self.chunked_inferece(wav_path, midi_path)
+        else:
+            activations = self.inference(wav_path, midi_path)
+
+        # Match shape
+        activations = activations.squeeze(0).cpu().numpy()
+        
         n_frames = activations.shape[-1]
         times = self.model.sliCQ.get_times(n_frames)
         midi_freqs = self.model.sliCQ.midi_freqs
