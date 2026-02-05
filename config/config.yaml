@@ -10,13 +10,18 @@ adapter:
   _target_: pipeline.permutations.InputAdapter
 
 evalutation:
-  subsample_every: 500
+  subsample_every: 10
 
 chunked_inference: True
+
+thresholds:
+  high_freq: 0.85
+  fund_masking: 0.4
+  harm_masking: 0.4
 
 hydra:
   sweeper:
     params:
       model: basic_pitch, timbre_trap
-      permutation: high_freq, random, no_permutation, microtonal, fund_mask, harm_mask, soft_fund_mask, soft_harm_mask
+      permutation: no_permutation, random, high_freq, microtonal, fund_mask, harm_mask, soft_fund_mask, soft_harm_mask
       dataset: maps, maestro
